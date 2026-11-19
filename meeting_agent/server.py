@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 UI_DIR = config.ROOT / "ui"
 STAGES = {"transcribe": "Расшифровка", "diarize": "Разделение собеседников",
           "refine": "Уточняю, кто что сказал", "voices": "Узнаю голоса", "names": "Угадываю имена", "summarize": "Составление протокола"}
-BACKENDS = {"local": "На этом Mac (Qwen)", "claude-code": "Claude по подписке (Claude Code)",
+BACKENDS = {"local": f"На {osutil.PC} (Qwen)", "claude-code": "Claude по подписке (Claude Code)",
             "claude": "Claude API по ключу", "gemini": "Gemini API по ключу",
             "openai": "ChatGPT (OpenAI API) по ключу"}
 

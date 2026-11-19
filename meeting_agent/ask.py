@@ -18,12 +18,13 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from . import config
+from .osutil import PC
 
 log = logging.getLogger(__name__)
 
 BACKENDS = {"claude-code": "Claude по подписке (Claude Code)", "claude": "Claude API по ключу",
             "gemini": "Gemini API по ключу", "openai": "ChatGPT (OpenAI API) по ключу",
-            "local": "Qwen на этом Mac"}
+            "local": f"Qwen на {PC}"}
 
 SYSTEM = ("Ты отвечаешь на вопросы о рабочих встречах пользователя по фрагментам их протоколов и расшифровок. "
           "Пиши по-русски, коротко и по делу. Опирайся только на фрагменты; если ответа в них нет — так и скажи. "

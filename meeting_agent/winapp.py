@@ -344,8 +344,11 @@ def ensure_start_menu_shortcut() -> None:
     marker = HOME / "shortcut.txt"
     if link.exists() and marker.exists() and marker.read_text(encoding="utf-8") == EXE:
         return
-    ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{link}');"
-          f"$s.TargetPath='{EXE}';$s.WorkingDirectory='{Path(EXE).parent}';$s.Save()")
+    def q(v) -> str:  # строка PowerShell в одинарных кавычках: апостроф удваивается (C:\Users\O'Connor)
+        return "'" + str(v).replace("'", "''") + "'"
+
+    ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({q(link)});"
+          f"$s.TargetPath={q(EXE)};$s.WorkingDirectory={q(Path(EXE).parent)};$s.Save()")
     r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
                        capture_output=True, creationflags=osutil.CREATE_NO_WINDOW)
     if r.returncode == 0:

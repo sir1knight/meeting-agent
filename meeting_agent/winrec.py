@@ -62,11 +62,19 @@ class WavWriter:
             self.f.close()
 
 
-def _com_init() -> None:
-    """soundcard работает через COM: в каждом новом потоке его нужно инициализировать."""
+def _com_init() -> bool:
+    """soundcard работает через COM: в каждом новом потоке его нужно инициализировать.
+    True — инициализация прошла (S_OK или S_FALSE), и в конце потока нужен парный CoUninitialize."""
     import ctypes
 
-    ctypes.windll.ole32.CoInitializeEx(None, 0)
+    return ctypes.windll.ole32.CoInitializeEx(None, 0) in (0, 1)
+
+
+def _com_done(inited: bool) -> None:
+    if inited:
+        import ctypes
+
+        ctypes.windll.ole32.CoUninitialize()
 
 
 class Track(threading.Thread):
@@ -77,26 +85,30 @@ class Track(threading.Thread):
         self.open_device = open_device
         self.pad_by_clock = pad_by_clock
         self.stop_event = threading.Event()
-        self.first_time: float | None = None
+        self.first_time: float | None = None  # время начала по часам системы — для meta.json
+        self.first_mono: float | None = None  # то же по монотонным часам — для расчёта пропусков
         self.error: Exception | None = None
         self.ready = threading.Event()
 
     def run(self) -> None:
+        inited = False
         try:
-            _com_init()
+            inited = _com_init()
             with self.open_device().recorder(samplerate=RATE, blocksize=BLOCK) as rec:
                 self.ready.set()
                 while not self.stop_event.is_set():
                     data = rec.record(numframes=BLOCK)
-                    now = time.time()
+                    now, now_mono = time.time(), time.monotonic()
                     if not len(data):
                         continue
                     mono = data.mean(axis=1) if data.ndim > 1 else data
                     if self.first_time is None:
                         self.first_time = now - len(mono) / RATE
+                        self.first_mono = now_mono - len(mono) / RATE
                     elif self.pad_by_clock:
                         # Система ничего не присылала (тишина) — дописываем нули до текущего момента.
-                        gap = int((now - self.first_time) * RATE) - len(mono) - self.writer.frames
+                        # Монотонные часы: подводка системных часов (NTP) не превратится в «тишину».
+                        gap = int((now_mono - self.first_mono) * RATE) - len(mono) - self.writer.frames
                         if gap > RATE // 5:
                             self.writer.silence(gap)
                     self.writer.write(mono.astype(np.float32))
@@ -105,6 +117,7 @@ class Track(threading.Thread):
             log.exception("Запись дорожки %s оборвалась", self.track)
         finally:
             self.ready.set()
+            _com_done(inited)
 
 
 class SilenceKeeper(threading.Thread):
@@ -115,16 +128,19 @@ class SilenceKeeper(threading.Thread):
         self.stop_event = threading.Event()
 
     def run(self) -> None:
+        inited = False
         try:
             import soundcard as sc
 
-            _com_init()
+            inited = _com_init()
             zeros = np.zeros((BLOCK, 1), dtype=np.float32)
             with sc.default_speaker().player(samplerate=RATE, channels=1, blocksize=BLOCK) as p:
                 while not self.stop_event.is_set():
                     p.play(zeros)
         except Exception as e:
             log.warning("Беззвучный поток не запустился (%s) — пропуски заполню по часам", e)
+        finally:
+            _com_done(inited)
 
 
 class MeetingRecorder:
@@ -136,9 +152,13 @@ class MeetingRecorder:
     def start(self) -> None:
         import soundcard as sc
 
-        _com_init()  # запись начинают из потока слежения за Zoom или из меню трея
+        _com_init()  # запись начинают из потока слежения за Zoom или из меню трея (поток живёт долго)
         self.folder.mkdir(parents=True, exist_ok=True)
-        speaker = sc.default_speaker()
+        try:
+            speaker = sc.default_speaker()
+        except Exception as e:
+            raise RuntimeError(f"Нет устройства вывода звука ({e}): подключите динамики или наушники "
+                               "и выберите их в Параметрах Windows → Система → Звук") from e
         mic = Track("mic", WavWriter(self.folder / "mic.wav", RATE), sc.default_microphone, pad_by_clock=False)
         others = Track("others", WavWriter(self.folder / "others.wav", RATE),
                        lambda: sc.get_microphone(speaker.id, include_loopback=True), pad_by_clock=True)
@@ -156,13 +176,17 @@ class MeetingRecorder:
         if others.error:
             self.stop()
             raise RuntimeError(f"Не удалось записывать звук компьютера: {others.error}")
-        log.info("Запись: микрофон «%s», звук компьютера с «%s»", sc.default_microphone().name, speaker.name)
+        try:
+            mic_name = sc.default_microphone().name
+        except Exception:
+            mic_name = "?"
+        log.info("Запись: микрофон «%s», звук компьютера с «%s»", mic_name, speaker.name)
 
     def alive(self) -> bool:
         return any(t.is_alive() for t in self.tracks)
 
     def stop(self) -> None:
-        stopped = time.time()
+        stopped = time.monotonic()
         if self.keeper:
             self.keeper.stop_event.set()
         for t in self.tracks:
@@ -171,8 +195,8 @@ class MeetingRecorder:
             t.join(5)
         for t in self.tracks:
             # Хвост тишины после последнего звука собеседников — до момента остановки.
-            if t.pad_by_clock and t.first_time:
-                gap = int((stopped - t.first_time) * RATE) - t.writer.frames
+            if t.pad_by_clock and t.first_mono:
+                gap = int((stopped - t.first_mono) * RATE) - t.writer.frames
                 if gap > RATE // 5:
                     t.writer.silence(gap)
             t.writer.close()

@@ -15,6 +15,16 @@ if IS_WIN:
     from ctypes import wintypes
 
     _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Без объявленных типов ctypes обрезает 64-битные HANDLE до 32-битного int.
+    _k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _k32.OpenProcess.restype = wintypes.HANDLE
+    _k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _k32.WaitForSingleObject.restype = wintypes.DWORD
+    _k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _k32.CloseHandle.restype = wintypes.BOOL
+    _k32.GetCurrentProcess.restype = wintypes.HANDLE
+    _k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    _k32.SetPriorityClass.restype = wintypes.BOOL
     CREATE_NO_WINDOW = 0x08000000
 
 
@@ -37,7 +47,8 @@ def reveal(path: Path) -> None:
     """Файл — выделить в Finder/Проводнике, папку — открыть."""
     if IS_WIN:
         if path.is_file():
-            subprocess.run(["explorer", "/select,", str(path)], check=False)
+            # Строкой, а не списком: explorer разбирает командную строку по-своему и ждёт /select,"путь".
+            subprocess.run(f'explorer /select,"{path}"', check=False)
         else:
             os.startfile(str(path))  # noqa: S606 — только наши папки
     else:
@@ -106,7 +117,7 @@ def process_alive(pid: int) -> bool:
         SYNCHRONIZE, WAIT_TIMEOUT = 0x00100000, 0x102
         h = _k32.OpenProcess(SYNCHRONIZE, False, pid)
         if not h:
-            return False
+            return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: процесс есть, просто чужой
         try:
             return _k32.WaitForSingleObject(h, 0) == WAIT_TIMEOUT
         finally:

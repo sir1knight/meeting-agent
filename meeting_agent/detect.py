@@ -30,8 +30,7 @@ def _windows_win() -> list[tuple[str, str]]:
     import ctypes
     from ctypes import wintypes
 
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32, kernel32 = _win_api()
     names: dict[int, str] = {}
 
     def process_name(pid: int) -> str:
@@ -63,6 +62,38 @@ def _windows_win() -> list[tuple[str, str]]:
 
     user32.EnumWindows(visit, 0)
     return out
+
+
+_api = None
+
+
+def _win_api():
+    """user32/kernel32 с объявленными типами: без них ctypes считает HANDLE/HWND 32-битным int."""
+    global _api
+    if _api is None:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                        ctypes.POINTER(wintypes.DWORD)]
+        kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.EnumWindows.restype = wintypes.BOOL
+        _api = (user32, kernel32)
+    return _api
 
 
 def in_meeting(titles: list[str]) -> bool:

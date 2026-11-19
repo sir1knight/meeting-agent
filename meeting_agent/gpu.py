@@ -1,7 +1,7 @@
 """Ускорение на видеокарте NVIDIA (Windows), скачивается по желанию в настройках.
 
 В приложение входят только сборки для процессора: библиотеки CUDA весят больше гигабайта и нужны не всем.
-Кнопка «Ускорение NVIDIA» скачивает в <данные приложения>\\gpu\\bin:
+Кнопка «Ускорение NVIDIA» скачивает в <данные приложения>\\gpu\\bin-<время установки>:
   - llama.cpp с CUDA 12.4 (официальная сборка ggml-org) — Qwen работает в отдельном процессе llama-server
     целиком на видеокарте;
   - библиотеки CUDA 12 (cudart, cuBLAS) из той же сборки и cuDNN 9 (пакет NVIDIA с PyPI) — с ними
@@ -32,8 +32,7 @@ PARTS = [
     ("cuDNN", None, 696e6, "nvidia/cudnn/bin/"),
 ]
 GPU_DIR = config.HOME / "gpu"
-BIN = GPU_DIR / "bin"
-READY = GPU_DIR / ".ready"
+READY = GPU_DIR / ".ready"  # имя текущей папки с библиотеками (bin-<время установки>)
 SERVER_EXE = "meeting-agent-llm.exe"  # переименованный llama-server.exe: свой процесс легко найти и закрыть
 MIN_LLM_VRAM_MB = 7000  # Qwen 7B (4,7 ГБ) + контекст 16 тыс. токенов (~1 ГБ) с запасом
 
@@ -60,8 +59,26 @@ def nvidia() -> dict | None:
     return _nvidia or None
 
 
+def bin_dir() -> Path | None:
+    """Текущая папка с библиотеками. Каждая установка — в новую папку: DLL, загруженные работающим
+    процессом, Windows не даёт ни удалить, ни переименовать; старые папки убираются при следующем запуске."""
+    try:
+        name = READY.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return GPU_DIR / name if name.startswith("bin-") else None
+
+
 def ready() -> bool:
-    return osutil.IS_WIN and READY.exists() and (BIN / SERVER_EXE).exists()
+    b = bin_dir()
+    return osutil.IS_WIN and b is not None and (b / SERVER_EXE).exists()
+
+
+def _cleanup_old() -> None:
+    current = bin_dir()
+    for d in GPU_DIR.glob("bin-*"):
+        if d != current:
+            shutil.rmtree(d, ignore_errors=True)  # занятые файлы останутся до следующего раза
 
 
 def llm_on_gpu() -> bool:
@@ -84,7 +101,8 @@ def activate() -> None:
     """Библиотеки CUDA видны процессу: для CTranslate2 (Whisper) и всего, что грузит их по имени."""
     if not ready():
         return
-    path = str(BIN)
+    _cleanup_old()
+    path = str(bin_dir())
     if path not in os.environ.get("PATH", ""):
         os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
     try:
@@ -124,7 +142,7 @@ def _install() -> None:
         READY.unlink(missing_ok=True)
         tmp = GPU_DIR / "download"
         tmp.mkdir(exist_ok=True)
-        new_bin = GPU_DIR / "bin.new"
+        new_bin = GPU_DIR / f"bin-{int(time.time())}"
         shutil.rmtree(new_bin, ignore_errors=True)
         new_bin.mkdir()
         base = 0
@@ -140,12 +158,10 @@ def _install() -> None:
         if not server.exists():
             raise RuntimeError("В сборке llama.cpp нет llama-server.exe")
         server.rename(new_bin / SERVER_EXE)
-        shutil.rmtree(BIN, ignore_errors=True)
-        new_bin.rename(BIN)
         shutil.rmtree(tmp, ignore_errors=True)
-        READY.write_text(LLAMA_TAG, encoding="utf-8")
+        READY.write_text(new_bin.name, encoding="utf-8")
         activate()
-        log.info("Ускорение NVIDIA установлено (%s)", BIN)
+        log.info("Ускорение NVIDIA установлено (%s, llama.cpp %s)", new_bin, LLAMA_TAG)
         with _lock:
             _state.update(state="idle", part="", done=_state["total"])
     except Exception as e:
@@ -235,12 +251,13 @@ def server_url(model_path: str) -> str:
         port = s.getsockname()[1]
     logs = config.HOME / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    cmd = [str(BIN / SERVER_EXE), "-m", model_path, "-c", "16384", "-np", "1", "-ngl", "99",
+    bin_ = bin_dir()
+    cmd = [str(bin_ / SERVER_EXE), "-m", model_path, "-c", "16384", "-np", "1", "-ngl", "99",
            "--host", "127.0.0.1", "--port", str(port)]
     log.info("Запускаю Qwen на видеокарте: %s", " ".join(cmd[1:]))
     out = open(logs / "llama-server.log", "w", encoding="utf-8", errors="replace")
-    proc = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, cwd=str(BIN),
-                            env=dict(os.environ, PATH=str(BIN) + os.pathsep + os.environ.get("PATH", "")),
+    proc = subprocess.Popen(cmd, stdout=out, stderr=subprocess.STDOUT, cwd=str(bin_),
+                            env=dict(os.environ, PATH=str(bin_) + os.pathsep + os.environ.get("PATH", "")),
                             **osutil.popen_kwargs())
     url = f"http://127.0.0.1:{port}"
     deadline = time.time() + 180
