@@ -1,0 +1,9 @@
+Meeting Agent
+Copyright 2026 sir1knight
+
+Лицензия: Apache License, Version 2.0 (файл LICENSE).
+
+Модели и библиотеки, которые приложение скачивает или включает в сборки,
+распространяются по своим лицензиям: Whisper (MIT), GigaAM (MIT),
+Qwen 2.5 (Apache 2.0), pyannote (MIT), llama.cpp (MIT), PyTorch (BSD),
+библиотеки NVIDIA CUDA и cuDNN (лицензии NVIDIA).

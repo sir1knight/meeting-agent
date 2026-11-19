@@ -225,6 +225,6 @@ Qwen на M1 Pro читает ~250–400 токенов/с и пишет ~20–3
 
 ## Лицензия и участие
 
-[MIT](LICENSE). Как предложить изменения — [CONTRIBUTING.md](CONTRIBUTING.md), [кодекс поведения](CODE_OF_CONDUCT.md), об уязвимостях — [SECURITY.md](SECURITY.md).
+[Apache 2.0](LICENSE) (см. также [NOTICE](NOTICE)). Как предложить изменения — [CONTRIBUTING.md](CONTRIBUTING.md), [кодекс поведения](CODE_OF_CONDUCT.md), об уязвимостях — [SECURITY.md](SECURITY.md).
 
 Модели распространяются по своим лицензиям: Whisper — MIT, GigaAM — MIT, Qwen 2.5 — Apache 2.0, pyannote — MIT (с условиями доступа на Hugging Face).
