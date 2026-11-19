@@ -35,7 +35,9 @@ function native(cmd, args = {}) {
   }
   const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.app;
   if (!h) {
-    toast("Запись доступна только в приложении Meeting Agent");
+    toast(window.pywebview === undefined && /Windows/.test(navigator.userAgent)
+      ? "Запись — через значок Meeting Agent в трее, рядом с часами"
+      : "Запись доступна только в приложении Meeting Agent");
     return false;
   }
   h.postMessage({ cmd, ...args });

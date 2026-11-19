@@ -33,6 +33,26 @@ def _message(text: str, title: str = TITLE) -> None:
     ctypes.windll.user32.MessageBoxW(None, text, title, 0x40)  # MB_ICONINFORMATION
 
 
+def _unblock_downloaded() -> None:
+    """Снимает с библиотек .NET пометку «скачано из интернета» (поток Zone.Identifier).
+
+    Если архив распаковали встроенным в Windows средством, такую пометку получает каждый файл,
+    и .NET отказывается загружать помеченные сборки: окно (pywebview → pythonnet) падает с
+    «Failed to resolve Python.Runtime.Loader.Initialize». Обычные DLL и .pyd пометка не мешает."""
+    site = Path(sys.executable).parent / "Lib" / "site-packages"
+    removed = 0
+    for sub in ("pythonnet", "clr_loader", "webview"):
+        for f in (site / sub).rglob("*"):
+            if f.suffix.lower() in (".dll", ".exe", ".pyd") and f.is_file():
+                try:
+                    os.remove(f"{f}:Zone.Identifier")
+                    removed += 1
+                except OSError:
+                    pass
+    if removed:
+        log.info("Снял пометку «из интернета» с %d библиотек", removed)
+
+
 def _free_port() -> int:
     import socket
 
@@ -342,6 +362,7 @@ class App:
         self.failed = 0
         self.seen_done: set[str] = set()
         self.quitting = False
+        self.browser_mode = False  # окно не открылось — интерфейс в браузере
 
     # --- команды из окна (app.js → native()) ---
     def command(self, msg: dict) -> bool:
@@ -366,6 +387,11 @@ class App:
                 pass
 
     def show_window(self, view: str | None = None) -> None:
+        if self.browser_mode:
+            import webbrowser
+
+            webbrowser.open(self.backend.url)
+            return
         if self.window:
             self.window.show()
             self.window.restore()
@@ -460,7 +486,6 @@ class App:
 
     def run(self) -> None:
         import pystray
-        import webview
 
         self.backend.start()
         if not self.backend.wait_ready():
@@ -481,18 +506,35 @@ class App:
         self.icon = pystray.Icon("MeetingAgent", self._image(), TITLE, self._menu())
         threading.Thread(target=self.icon.run, daemon=True).start()
 
-        self.window = webview.create_window(TITLE, self.backend.url, width=1180, height=780, min_size=(820, 560),
-                                            js_api=Bridge(self), text_select=True)
+        try:
+            import webview
 
-        def closing():
+            self.window = webview.create_window(TITLE, self.backend.url, width=1180, height=780,
+                                                min_size=(820, 560), js_api=Bridge(self), text_select=True)
+
+            def closing():
+                if self.quitting:
+                    return True
+                self.window.hide()  # закрытие окна прячет его: запись и автозапись продолжают работать
+                return False
+
+            self.window.events.closing += closing
+            webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
+            webview.start(gui="edgechromium", private_mode=False, storage_path=str(HOME / "webview"))
+        except Exception as e:
+            # Окно не открылось (нет .NET/WebView2, библиотеки заблокированы) — запись и трей работают,
+            # а интерфейс открываем в браузере по умолчанию.
             if self.quitting:
-                return True
-            self.window.hide()  # закрытие окна прячет его: запись и автозапись продолжают работать
-            return False
-
-        self.window.events.closing += closing
-        webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
-        webview.start(gui="edgechromium", private_mode=False, storage_path=str(HOME / "webview"))
+                return
+            log.exception("Окно приложения не открылось — открываю интерфейс в браузере")
+            self.window = None
+            self.browser_mode = True
+            self.show_window()
+            _message("Окно Meeting Agent не открылось, поэтому интерфейс открыт в браузере.\n"
+                     "Запись и автозапись Zoom работают; значок — в трее, рядом с часами.\n\n"
+                     f"Причина: {e}")
+            while not self.quitting:
+                time.sleep(1)
         self.quitting = True
         self.backend.stop()
 
@@ -533,6 +575,10 @@ def main() -> None:
         pass
     if _already_running():
         return
+    try:
+        _unblock_downloaded()
+    except Exception as e:
+        log.warning("Не снял пометку «из интернета»: %s", e)
     try:
         App().run()
     except Exception as e:
