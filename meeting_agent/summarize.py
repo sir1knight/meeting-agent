@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 import requests
 
@@ -166,6 +167,19 @@ def chat_claude(cfg: dict, user: str, system: str = SYSTEM) -> str:
     return "".join(b.text for b in resp.content if b.type == "text").strip()
 
 
+def _http(method: str, url: str, **kw) -> requests.Response:
+    """Запрос к облачному сервису с повтором при обрыве соединения: VPN переподключается,
+    сервер закрывает соединение без ответа и т. п. Ответы с ошибкой (4xx/5xx) не повторяем."""
+    for attempt in range(3):
+        try:
+            return requests.request(method, url, **kw)
+        except requests.ConnectionError as e:
+            if attempt == 2:
+                raise
+            log.warning("Обрыв связи с %s (%s), повторяю…", url.split("/")[2], e.__class__.__name__)
+            time.sleep(2 + 3 * attempt)
+
+
 GEMINI = "https://generativelanguage.googleapis.com/v1beta"
 _gemini_models: dict[str, str] = {}  # заданная модель → рабочая (если заданную убрали)
 # Модели бесплатного уровня Gemini API (ноябрь 2026); основная — первая.
@@ -196,10 +210,10 @@ def chat_gemini(cfg: dict, user: str, system: str = SYSTEM, model: str | None = 
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             "generationConfig": {"temperature": 0.2}}
     try:
-        r = requests.post(f"{GEMINI}/models/{model}:generateContent", headers=headers, json=body, timeout=900)
+        r = _http("POST", f"{GEMINI}/models/{model}:generateContent", headers=headers, json=body, timeout=900)
         if r.status_code == 404:  # модель сменили или убрали — берём актуальную того же семейства
             model = _pick_gemini_model(headers, "pro" if "pro" in wanted else "flash")
-            r = requests.post(f"{GEMINI}/models/{model}:generateContent", headers=headers, json=body, timeout=900)
+            r = _http("POST", f"{GEMINI}/models/{model}:generateContent", headers=headers, json=body, timeout=900)
     except requests.RequestException as e:
         raise RuntimeError("Нет связи с Gemini API: проверьте интернет") from e
     if r.status_code == 429:
@@ -234,7 +248,7 @@ def gemini_models() -> list[dict]:
     if not key:
         return []
     try:
-        r = requests.get(f"{GEMINI}/models", headers={"x-goog-api-key": key}, params={"pageSize": 1000}, timeout=20)
+        r = _http("GET", f"{GEMINI}/models", headers={"x-goog-api-key": key}, params={"pageSize": 1000}, timeout=20)
     except requests.RequestException as e:
         raise RuntimeError("Нет связи с Gemini API: проверьте интернет") from e
     if r.status_code in (400, 401, 403):
@@ -252,7 +266,7 @@ def gemini_models() -> list[dict]:
 
 
 def _pick_gemini_model(headers: dict, family: str) -> str:
-    r = requests.get(f"{GEMINI}/models", headers=headers, timeout=30)
+    r = _http("GET", f"{GEMINI}/models", headers=headers, timeout=30)
     r.raise_for_status()
     names = [m["name"].removeprefix("models/") for m in r.json().get("models", [])
              if "generateContent" in m.get("supportedGenerationMethods", [])]
@@ -274,8 +288,10 @@ def check_key(service: str, cfg: dict) -> dict:
             return _check_openai(cfg)
         if service == "claude":
             return _check_claude(cfg)
-    except requests.RequestException:
-        return {"ok": False, "message": "Нет связи с сервисом: проверьте интернет (и VPN, если он нужен)"}
+    except requests.RequestException as e:
+        log.warning("Проверка ключа %s: нет связи (%s)", service, e)
+        return {"ok": False, "message": "Нет связи с сервисом после трёх попыток: проверьте интернет "
+                                        f"(и VPN, если он нужен). Подробности: {e.__class__.__name__}"}
     raise ValueError("Неизвестный сервис")
 
 
@@ -284,12 +300,12 @@ def _check_gemini(cfg: dict) -> dict:
     if not key:
         return {"ok": False, "message": "Ключ не сохранён"}
     headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
-    r = requests.get(f"{GEMINI}/models", headers=headers, params={"pageSize": 1}, timeout=20)
+    r = _http("GET", f"{GEMINI}/models", headers=headers, params={"pageSize": 1}, timeout=20)
     if r.status_code in (400, 401, 403):
         return {"ok": False, "message": f"Google не принял ключ: {_api_error(r)[:200]}"}
     r.raise_for_status()
     model = gemini_model(cfg.get("gemini", {}).get("model"))
-    r = requests.post(f"{GEMINI}/models/{model}:generateContent", headers=headers, timeout=60,
+    r = _http("POST", f"{GEMINI}/models/{model}:generateContent", headers=headers, timeout=60,
                       json={"contents": [{"role": "user", "parts": [{"text": "Ответь одним словом: готово"}]}],
                             "generationConfig": {"maxOutputTokens": 32}})
     if r.status_code == 200:
@@ -309,11 +325,11 @@ def _check_openai(cfg: dict) -> dict:
         return {"ok": False, "message": "Ключ не сохранён"}
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     model = cfg.get("openai", {}).get("model") or "gpt-5"
-    r = requests.post(f"{OPENAI}/chat/completions", headers=headers, timeout=60,
+    r = _http("POST", f"{OPENAI}/chat/completions", headers=headers, timeout=60,
                       json={"model": model, "max_completion_tokens": 16,
                             "messages": [{"role": "user", "content": "Ответь одним словом: готово"}]})
     if r.status_code == 404:  # модели нет — ключ проверим по списку моделей
-        r2 = requests.get(f"{OPENAI}/models", headers=headers, timeout=20)
+        r2 = _http("GET", f"{OPENAI}/models", headers=headers, timeout=20)
         if r2.status_code == 200:
             return {"ok": True, "message": f"Ключ работает; модели {model} нет — при запросе возьмётся актуальная"}
         r = r2
@@ -335,7 +351,7 @@ def _check_claude(cfg: dict) -> dict:
     if not key:
         return {"ok": False, "message": "Ключ не сохранён"}
     model = cfg["claude"]["model"]
-    r = requests.post("https://api.anthropic.com/v1/messages", timeout=60,
+    r = _http("POST", "https://api.anthropic.com/v1/messages", timeout=60,
                       headers={"x-api-key": key, "anthropic-version": "2023-06-01",
                                "content-type": "application/json"},
                       json={"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]})
@@ -366,10 +382,10 @@ def chat_openai(cfg: dict, user: str, system: str = SYSTEM) -> str:
     body = {"model": model, "messages": [{"role": "system", "content": system},
                                          {"role": "user", "content": user}]}
     try:
-        r = requests.post(f"{OPENAI}/chat/completions", headers=headers, json=body, timeout=1800)
+        r = _http("POST", f"{OPENAI}/chat/completions", headers=headers, json=body, timeout=1800)
         if r.status_code == 404:  # модель убрали или нет к ней доступа — берём актуальную
             model = body["model"] = _pick_openai_model(headers)
-            r = requests.post(f"{OPENAI}/chat/completions", headers=headers, json=body, timeout=1800)
+            r = _http("POST", f"{OPENAI}/chat/completions", headers=headers, json=body, timeout=1800)
     except requests.RequestException as e:
         raise RuntimeError("Нет связи с OpenAI API: проверьте интернет") from e
     if r.status_code == 401:
@@ -390,7 +406,7 @@ def chat_openai(cfg: dict, user: str, system: str = SYSTEM) -> str:
 
 
 def _pick_openai_model(headers: dict) -> str:
-    r = requests.get(f"{OPENAI}/models", headers=headers, timeout=30)
+    r = _http("GET", f"{OPENAI}/models", headers=headers, timeout=30)
     r.raise_for_status()
     ids = [m["id"] for m in r.json().get("data", [])]
     skip = ("mini", "nano", "audio", "realtime", "search", "image", "tts", "transcribe", "codex", "chat", "pro")
