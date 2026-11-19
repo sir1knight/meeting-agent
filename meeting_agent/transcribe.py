@@ -139,6 +139,9 @@ def _faster_whisper(path: str, force_cpu: bool = False):
     if _fw is None or _fw[0] != path or (force_cpu and _fw[2] != "cpu"):
         import os
 
+        from . import gpu
+
+        gpu.activate()  # библиотеки CUDA из «Ускорения NVIDIA», если скачаны
         from faster_whisper import WhisperModel
 
         model, device = None, "cpu"
@@ -147,7 +150,11 @@ def _faster_whisper(path: str, force_cpu: bool = False):
                 import ctranslate2
 
                 if ctranslate2.get_cuda_device_count() > 0:
-                    model, device = WhisperModel(path, device="cuda", compute_type="float16"), "cuda"
+                    try:
+                        model = WhisperModel(path, device="cuda", compute_type="float16")
+                    except ValueError:  # старые карты (MX150, GTX 10xx) не умеют float16 — выбор за CTranslate2
+                        model = WhisperModel(path, device="cuda", compute_type="auto")
+                    device = "cuda"
                     log.info("Whisper на видеокарте NVIDIA")
             except Exception as e:
                 log.info("Видеокарта NVIDIA недоступна для Whisper (%s) — считаю на процессоре", e)

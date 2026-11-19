@@ -275,6 +275,7 @@ def get_settings(cfg: dict) -> dict:
         "anthropic_key_set": bool(config.anthropic_key(cfg)),
         "notes_dir": str(cfg["paths"]["notes"]),
         "platform": "windows" if osutil.IS_WIN else "mac",
+        "recommended_applied": bool(cfg.get("app", {}).get("recommended_applied")),
         "recordings_dir": str(cfg["paths"]["recordings"]),
     }
 
@@ -307,7 +308,8 @@ def save_settings(data: dict) -> None:
                                  "auto_record": ("app", "auto_record"),
                                  "voices_enabled": ("voices", "enabled"),
                                  "names_guess": ("names", "guess"),
-                                 "live_enabled": ("live", "enabled")}.items():
+                                 "live_enabled": ("live", "enabled"),
+                                 "recommended_applied": ("app", "recommended_applied")}.items():
         if isinstance(data.get(key), bool):
             put(section, name, data[key])
     if isinstance(data.get("claude_code_model"), str):
@@ -696,6 +698,29 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Неизвестная модель")
         self.state.downloads.start(name, config.load())
         self._json({"ok": True})
+
+    def api_get_hardware(self, q):
+        from . import hardware
+
+        hw = hardware.info()
+        self._json({"info": hw, "recommend": hardware.recommend(hw)})
+
+    def api_get_gpu(self, q):
+        from . import gpu
+
+        self._json(gpu.status())
+
+    def api_post_gpu_install(self, q):
+        from . import gpu
+
+        gpu.install()
+        self._json(gpu.status())
+
+    def api_post_gpu_remove(self, q):
+        from . import gpu
+
+        gpu.remove()
+        self._json(gpu.status())
 
     def api_post_models_pause(self, q):
         self.state.downloads.pause(str(self._data().get("name", "")))

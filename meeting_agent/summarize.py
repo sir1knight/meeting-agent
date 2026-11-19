@@ -328,11 +328,23 @@ def chat_local(cfg: dict, user: str, system: str = SYSTEM) -> str:
 
 
 _llama = None  # (путь, модель llama.cpp)
+_gpu_failed = False
 
 
 def _chat_llama(path: str, cfg: dict, user: str, system: str) -> str:
-    global _llama
+    global _llama, _gpu_failed
     llm = cfg["llm"]
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    from . import gpu
+
+    if not _gpu_failed and gpu.llm_on_gpu():
+        try:
+            text = gpu.chat(path, messages, int(llm["max_tokens"]), float(llm["temperature"]))
+            return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()
+        except Exception as e:
+            _gpu_failed = True  # до перезапуска приложения — на процессоре, не тратим время на повторы
+            gpu.stop_server()
+            log.warning("Qwen на видеокарте не заработал (%s) — считаю на процессоре", e)
     if _llama is None or _llama[0] != path:
         try:
             from llama_cpp import Llama
@@ -345,7 +357,7 @@ def _chat_llama(path: str, cfg: dict, user: str, system: str) -> str:
             raise RuntimeError(f"Не удалось загрузить модель {os.path.basename(path)}: {e}") from e
         _llama = (path, model)
     r = _llama[1].create_chat_completion(
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        messages=messages,
         max_tokens=int(llm["max_tokens"]), temperature=float(llm["temperature"]))
     text = r["choices"][0]["message"]["content"] or ""
     return re.sub(r"<think>.*?</think>", "", text, flags=re.S).strip()

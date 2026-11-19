@@ -118,6 +118,10 @@ class Backend:
         self.stopping = True
         if self.proc and self.proc.poll() is None:
             self.proc.terminate()
+        # Qwen на видеокарте — отдельный процесс сервера; без него он остался бы держать видеопамять.
+        from .gpu import SERVER_EXE
+
+        subprocess.run(["taskkill", "/F", "/IM", SERVER_EXE], capture_output=True, **osutil.popen_kwargs())
 
     def request(self, path: str, body: dict | None = None) -> dict | None:
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/{path}",

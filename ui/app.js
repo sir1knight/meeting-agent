@@ -984,18 +984,26 @@ function renderSetup() {
   // Распознавание и pyannote — в своих шагах, здесь — остальные (Qwen).
   const other = modelsHtml(st.models, { onlyRequired: true, except: ["whisper", "diarization"] });
   if (s.hf_token_set && !S.hfCheck) checkHf();  // токен уже есть (например, из прошлой установки)
+  // Подбор под компьютер — только на Windows: Mac у нас всегда Apple Silicon, выбор по умолчанию подходит.
+  if (IS_WIN && S.hardware === undefined) { S.hardware = null; loadHardware(); }
+  if (IS_WIN && S.gpu === undefined) { S.gpu = null; loadGpu(); }
+  const nvidiaStep = IS_WIN && S.gpu && S.gpu.nvidia;
+  let n = 0;
+  const step = () => ++n;
   const html = `<div class="page">
     <h1>Добро пожаловать в Meeting Agent</h1>
     <p class="muted">Для работы нужно один раз скачать модели. Записи и расшифровки остаются на ${PC}.</p>
-    <div class="card"><h2>1. Кто пишет протоколы</h2>
+    ${hardwareHtml(s)}
+    <div class="card"><h2>${step()}. Кто пишет протоколы</h2>
       <div class="hint">Звук в любом случае расшифровывается на ${PC}. Выбор можно поменять в настройках.</div>
       ${backendRadios(s)}</div>
-    <div class="card"><h2>2. Распознавание речи</h2>
+    <div class="card"><h2>${step()}. Распознавание речи</h2>
       <div class="hint">Выберите модель и нажмите «Скачать». Загрузку можно прервать: при следующем запуске она продолжится с того же места. Модель можно сменить в настройках.</div>
       ${asrRadios(s)}</div>
-    ${other ? `<div class="card"><h2>3. Модель для протоколов</h2>${other}</div>` : ""}
-    <div class="card"><h2>${other ? 4 : 3}. Разделение собеседников — по желанию</h2>${hfSetupHtml(s, st)}</div>
-    <div class="card"><h2>${other ? 5 : 4}. Разрешения ${IS_WIN ? "Windows" : "macOS"}</h2>
+    ${nvidiaStep ? gpuCardHtml(`${step()}. Ускорение NVIDIA${S.hardware && S.hardware.recommend.gpu_accel ? "" : " — по желанию"}`) : ""}
+    ${other ? `<div class="card"><h2>${step()}. Модель для протоколов</h2>${other}</div>` : ""}
+    <div class="card"><h2>${step()}. Разделение собеседников — по желанию</h2>${hfSetupHtml(s, st)}</div>
+    <div class="card"><h2>${step()}. Разрешения ${IS_WIN ? "Windows" : "macOS"}</h2>
       <div class="hint">${IS_WIN
         ? "Приложение записывает ваш микрофон и весь звук компьютера (в нём собеседники из Zoom). Если запись не начинается, откройте Параметры Windows → Конфиденциальность и защита → Микрофон и включите «Разрешить классическим приложениям доступ к микрофону». Собеседники пишутся с устройства вывода по умолчанию — в Zoom оставьте динамик «Как в системе»."
         : "При первой записи macOS спросит доступ к <b>микрофону</b> и к <b>записи экрана и системного звука</b>. Разрешите оба: без второго приложение не услышит собеседников в Zoom."}</div></div>
@@ -1011,8 +1019,53 @@ function renderSetup() {
     if (i) { i.value = value; if (focused) i.focus(); }
   }
   bindBackendRadios($("setup"));
+  bindGpu($("gpuCard"));
   $("setupDone").onclick = () => { S.setupDismissed = true; show("meeting"); };
   $("setupLater").onclick = () => { S.setupDismissed = true; show("meeting"); };
+}
+
+// --- Первый запуск: какой это компьютер и что ему подходит (hardware.py) ---
+async function loadHardware() {
+  try {
+    S.hardware = await api("hardware");
+  } catch {
+    return;
+  }
+  const s = S.settings, r = S.hardware.recommend;
+  // Свежая установка (ни одной модели распознавания) — сразу выбираем рекомендованное, один раз.
+  const fresh = !Object.values(s.asr_engines).some((e) => e.ready);
+  if (!s.recommended_applied && fresh) {
+    try {
+      S.settings = await api("settings", { method: "POST", body: { llm_backend: r.llm, asr_engine: r.asr, recommended_applied: true } });
+      await pollStatus();
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+  S.setupHtml = null;
+  if (S.view === "setup") renderSetup();
+}
+
+function hardwareHtml(s) {
+  const h = S.hardware;
+  if (!h) return "";
+  const i = h.info, r = h.recommend;
+  const gpu = i.gpu && i.gpu.kind === "nvidia" ? ` · ${esc(i.gpu.name)} (${Math.round(i.gpu.vram_gb)} ГБ)` : "";
+  const asr = (s.asr_engines[r.asr] || {}).title || r.asr;
+  const llm = s.backends[r.llm] || r.llm;
+  return `<div class="card reco"><h2>Ваш компьютер</h2>
+    <div class="hint">${esc(i.cpu)} · ${i.cores} ${IS_WIN ? "потоков" : "ядер"} · ${Math.round(i.ram_gb)} ГБ памяти${gpu} · ${esc(i.os)}</div>
+    <ul class="steps">
+      <li><b>Распознавание: ${esc(asr)}.</b> ${esc(r.notes.asr)}</li>
+      <li><b>Протоколы: ${esc(llm)}.</b> ${esc(r.notes.llm)}</li>
+      ${r.notes.gpu ? `<li><b>Ускорение NVIDIA${r.gpu_accel ? "" : " — не обязательно"}.</b> ${esc(r.notes.gpu)}</li>` : ""}
+    </ul>
+    <div class="hint">Рекомендованные варианты отмечены ниже${s.recommended_applied ? " и уже выбраны" : ""} — их можно поменять.</div></div>`;
+}
+
+function recoBadge(kind, key) {
+  const r = S.hardware && S.hardware.recommend;
+  return r && r[kind] === key ? ' <span class="badge ok">рекомендуется</span>' : "";
 }
 
 function hfSetupHtml(s, st) {
@@ -1043,7 +1096,7 @@ function hfSetupHtml(s, st) {
 
 function backendRadios(s) {
   const desc = {
-    "local": "Бесплатно, ничего не уходит в интернет. Нужна модель Qwen (~4,3 ГБ), протокол часовой встречи — 2–4 минуты.",
+    "local": `Бесплатно, ничего не уходит в интернет. Нужна модель Qwen (~${IS_WIN ? "4,7" : "4,3"} ГБ). Протокол часовой встречи — около 10 минут на Mac M1 Pro, пара минут на мощной видеокарте NVIDIA, 20–50 минут на процессоре.`,
     "claude-code": s.claude_code_path
       ? "Без доплаты, расходует лимиты вашей подписки Claude. Протоколы точнее."
       : "Нужен установленный Claude Code с входом по подписке — сейчас он не найден.",
@@ -1056,7 +1109,7 @@ function backendRadios(s) {
   const cloud = { "claude-code": "Anthropic", "claude": "Anthropic", "gemini": "Google", "openai": "OpenAI" };
   return Object.entries(s.backends).map(([k, v]) => `<label class="radio${k === s.llm_backend ? " selected" : ""}">
     <input type="radio" name="backend" value="${k}"${k === s.llm_backend ? " checked" : ""}>
-    <div><div class="r-title">${esc(v)}</div><div class="r-desc">${esc(desc[k] || "")}</div>
+    <div><div class="r-title">${esc(v)}${S.view === "setup" ? recoBadge("llm", k) : ""}</div><div class="r-desc">${esc(desc[k] || "")}</div>
     ${cloud[k] ? `<div class="cloud-note">Текст расшифровки отправляется в облако ${cloud[k]}. Уточните, разрешено ли это для рабочих встреч.</div>` : ""}</div></label>
     ${k === s.llm_backend ? backendExtra(s, k) : ""}`).join("");
 }
@@ -1154,7 +1207,7 @@ function asrRadios(s) {
     const dl = on && !ready && m ? downloadWidget("whisper", m, e.size) : "";
     return `<label class="radio${on ? " selected" : ""}">
       <input type="radio" name="asr" value="${k}"${on ? " checked" : ""}>
-      <div style="flex:1"><div class="r-title">${esc(e.title)} ${badge}</div><div class="r-desc">${esc(e.desc)}</div>${dl}</div></label>`;
+      <div style="flex:1"><div class="r-title">${esc(e.title)} ${badge}${S.view === "setup" ? recoBadge("asr", k) : ""}</div><div class="r-desc">${esc(e.desc)}</div>${dl}</div></label>`;
   }).join("");
 }
 
@@ -1222,6 +1275,73 @@ function bindBackendRadios(root) {
 }
 
 // ---------- настройки ----------
+
+// --- Ускорение NVIDIA (Windows): библиотеки CUDA скачиваются по желанию ---
+let gpuTimer = null;
+async function loadGpu() {
+  try {
+    S.gpu = await api("gpu");
+  } catch (e) {
+    S.gpu = null;
+    const card = $("gpuCard");
+    if (card) card.querySelector(".hint").textContent = e.message;
+    return;
+  }
+  const card = $("gpuCard");
+  if (card) {
+    card.innerHTML = card.dataset.title + gpuHtml(S.gpu);
+    bindGpu(card);
+  }
+  clearTimeout(gpuTimer);
+  if (S.gpu.state === "downloading") gpuTimer = setTimeout(loadGpu, 1500);
+}
+
+function gpuCardHtml(title) {
+  const t = `<h2>${title}</h2>`;
+  return `<div class="card" id="gpuCard" data-title="${esc(t)}">${t}${S.gpu ? gpuHtml(S.gpu) : '<div class="hint">Проверяю видеокарту…</div>'}</div>`;
+}
+
+function bindGpu(card) {
+  if (!card) return;
+  card.querySelectorAll("[data-gpu]").forEach((b) => b.addEventListener("click", async () => {
+    const act = b.dataset.gpu;
+    if (act === "remove" && !confirm("Удалить библиотеки CUDA? Распознавание и Qwen снова будут работать на процессоре.")) return;
+    b.disabled = true;
+    try {
+      await api("gpu/" + act, { method: "POST", body: {} });
+    } catch (e) {
+      toast(e.message, 6000);
+    }
+    loadGpu();
+  }));
+}
+
+function gpuHtml(g) {
+  if (!g.nvidia) {
+    return `<div class="hint">Видеокарта NVIDIA не найдена (или не установлен её драйвер) — всё считается на процессоре.
+      Видеокарты Intel и AMD приложение не использует.</div>`;
+  }
+  const vram = (g.nvidia.vram_mb / 1024).toFixed(0);
+  const small = g.nvidia.vram_mb < g.min_llm_vram_mb;
+  let html = `<div class="hint">${esc(g.nvidia.name)} · ${vram} ГБ видеопамяти · драйвер ${esc(g.nvidia.driver)}</div>
+    <div class="hint">В приложение входят только сборки для процессора. Здесь можно один раз скачать библиотеки CUDA
+    (llama.cpp, cuBLAS, cuDNN ≈ ${fmtBytes(g.size)}): тогда Whisper${small ? "" : " и локальный Qwen"} будут считать на видеокарте —
+    в несколько раз быстрее. GigaAM и разделение собеседников остаются на процессоре.</div>
+    ${small ? `<div class="hint">Для Qwen на видеокарте нужно от ${Math.ceil(g.min_llm_vram_mb / 1024)} ГБ видеопамяти — на этой карте ускорится только Whisper.</div>` : ""}`;
+  if (g.state === "downloading") {
+    const pct = g.total ? Math.min(100, (100 * g.done) / g.total) : 0;
+    html += `<div class="dl"><div class="bar"><div style="width:${pct}%"></div></div>
+      <div class="dl-row"><span class="muted small">${esc(g.part)}: ${fmtBytes(g.done)} из ≈ ${fmtBytes(g.total)}</span><span class="spinner"></span></div></div>`;
+  } else if (g.state === "ready") {
+    html += `<div class="row"><span class="badge ok">Включено</span>
+      <span class="muted small">Whisper${g.llm_on_gpu ? " и Qwen" : ""} — на видеокарте</span>
+      <button class="ghost small" type="button" data-gpu="remove">Удалить</button></div>`;
+  } else {
+    if (g.state === "error") html += `<div class="small" style="color:var(--rec)">${esc(g.error)}</div>`;
+    html += `<button class="ghost" type="button" data-gpu="install">${g.state === "error" ? "Повторить" : "Скачать"} ≈ ${fmtBytes(g.size)}</button>`;
+  }
+  return html;
+}
 
 function renderSettings() {
   const s = S.settings, st = S.status;
@@ -1303,12 +1423,14 @@ function renderSettings() {
     </div>
 
     <div class="card"><h2>Модели</h2>${modelsHtml(st ? st.models : {})}</div>
+    ${IS_WIN ? gpuCardHtml("Ускорение NVIDIA") : ""}
 
     <div class="card"><h2>Запись встреч и закон</h2>
       <div class="hint">Приложение не уведомляет участников о записи. Предупреждайте их и сверяйтесь с правилами компании.</div></div>
   </div>`;
 
   bindBackendRadios($("settings"));
+  loadGpu();
   const save = async (body, msg = "Сохранено") => {
     try {
       S.settings = await api("settings", { method: "POST", body });

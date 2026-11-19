@@ -288,6 +288,9 @@ def _write_note(path: Path, work: Path, segments: list[dict], total: float, star
         notify(cfg, "Протокол не составлен", "Расшифровка сохранена — составьте протокол позже")
         title = f"Встреча {started:%d.%m %H:%M}"
         summary = f"> Протокол не составлен: {e}"
+    from .gpu import stop_server
+
+    stop_server()  # Qwen на видеокарте (Windows) больше не нужен — освобождаем видеопамять
     failed = error_file.exists()
     participants = list(dict.fromkeys(s["speaker"] for s in segments))
     note = "\n".join([
