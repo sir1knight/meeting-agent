@@ -168,6 +168,20 @@ def chat_claude(cfg: dict, user: str, system: str = SYSTEM) -> str:
 
 GEMINI = "https://generativelanguage.googleapis.com/v1beta"
 _gemini_models: dict[str, str] = {}  # заданная модель → рабочая (если заданную убрали)
+# Модели бесплатного уровня Gemini API (ноябрь 2026); основная — первая.
+GEMINI_FREE = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+GEMINI_DEFAULT = GEMINI_FREE[0]
+GEMINI_MIN_VERSION = (3, 1)  # старее — не показываем и не используем
+
+
+def _gemini_version(name: str) -> tuple[int, int]:
+    m = re.match(r"gemini-(\d+)(?:\.(\d+))?", name)
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else (0, 0)
+
+
+def gemini_model(name: str | None) -> str:
+    """Заданная модель Gemini, а вместо устаревшей (2.x и т. п.) — основная бесплатная."""
+    return name if name and _gemini_version(name) >= GEMINI_MIN_VERSION else GEMINI_DEFAULT
 
 
 def chat_gemini(cfg: dict, user: str, system: str = SYSTEM, model: str | None = None) -> str:
@@ -176,7 +190,7 @@ def chat_gemini(cfg: dict, user: str, system: str = SYSTEM, model: str | None = 
     if not key:
         raise RuntimeError("Не задан ключ Gemini API: впишите его в Настройках → Gemini и ChatGPT")
     headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
-    wanted = model or cfg.get("gemini", {}).get("model") or "gemini-2.5-flash"
+    wanted = gemini_model(model or cfg.get("gemini", {}).get("model"))
     model = _gemini_models.get(wanted, wanted)
     body = {"system_instruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
@@ -230,9 +244,11 @@ def gemini_models() -> list[dict]:
     for m in r.json().get("models", []):
         name = m["name"].removeprefix("models/")
         if (name.startswith("gemini") and "generateContent" in m.get("supportedGenerationMethods", [])
-                and not any(x in name for x in _GEMINI_SKIP)):
-            out.append({"id": name, "title": m.get("displayName") or name})
-    return sorted(out, key=lambda m: m["id"], reverse=True)
+                and not any(x in name for x in _GEMINI_SKIP) and _gemini_version(name) >= GEMINI_MIN_VERSION):
+            out.append({"id": name, "title": m.get("displayName") or name, "free": name in GEMINI_FREE})
+    # Сначала бесплатные в порядке GEMINI_FREE, затем остальные — от новых к старым.
+    return sorted(out, key=lambda m: (GEMINI_FREE.index(m["id"]) if m["free"] else len(GEMINI_FREE),
+                                      tuple(-x for x in _gemini_version(m["id"])), m["id"]))
 
 
 def _pick_gemini_model(headers: dict, family: str) -> str:
@@ -240,10 +256,98 @@ def _pick_gemini_model(headers: dict, family: str) -> str:
     r.raise_for_status()
     names = [m["name"].removeprefix("models/") for m in r.json().get("models", [])
              if "generateContent" in m.get("supportedGenerationMethods", [])]
-    good = [n for n in names if family in n and not any(x in n for x in ("lite", "image", "tts", "preview", "exp"))]
+    good = [n for n in names if family in n and _gemini_version(n) >= GEMINI_MIN_VERSION
+            and not any(x in n for x in ("lite", "image", "tts", "preview", "exp"))]
     if not (good or names):
         raise RuntimeError("Gemini API не предлагает подходящих моделей")
-    return sorted(good or names)[-1]
+    return max(good, key=_gemini_version) if good else sorted(names)[-1]
+
+
+# ---------- проверка ключей ----------
+
+def check_key(service: str, cfg: dict) -> dict:
+    """Пробный запрос к сервису по сохранённому ключу: {ok, message}. Тратит один крошечный запрос."""
+    try:
+        if service == "gemini":
+            return _check_gemini(cfg)
+        if service == "openai":
+            return _check_openai(cfg)
+        if service == "claude":
+            return _check_claude(cfg)
+    except requests.RequestException:
+        return {"ok": False, "message": "Нет связи с сервисом: проверьте интернет (и VPN, если он нужен)"}
+    raise ValueError("Неизвестный сервис")
+
+
+def _check_gemini(cfg: dict) -> dict:
+    key = config.read_secret("gemini_key")
+    if not key:
+        return {"ok": False, "message": "Ключ не сохранён"}
+    headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
+    r = requests.get(f"{GEMINI}/models", headers=headers, params={"pageSize": 1}, timeout=20)
+    if r.status_code in (400, 401, 403):
+        return {"ok": False, "message": f"Google не принял ключ: {_api_error(r)[:200]}"}
+    r.raise_for_status()
+    model = gemini_model(cfg.get("gemini", {}).get("model"))
+    r = requests.post(f"{GEMINI}/models/{model}:generateContent", headers=headers, timeout=60,
+                      json={"contents": [{"role": "user", "parts": [{"text": "Ответь одним словом: готово"}]}],
+                            "generationConfig": {"maxOutputTokens": 32}})
+    if r.status_code == 200:
+        return {"ok": True, "message": f"Ключ работает, модель {model} отвечает"}
+    if r.status_code == 429:
+        return {"ok": False, "message": f"Ключ верный, но для {model} лимит исчерпан или модель недоступна "
+                                        f"без оплаты. Выберите другую модель или попробуйте позже. "
+                                        f"Ответ Google: {_api_error(r)[:150]}"}
+    if r.status_code == 404:
+        return {"ok": False, "message": f"Ключ верный, но модели {model} нет — выберите другую в списке"}
+    return {"ok": False, "message": f"Ключ верный, но запрос к {model} не прошёл: {_api_error(r)[:200]}"}
+
+
+def _check_openai(cfg: dict) -> dict:
+    key = openai_key(cfg)
+    if not key:
+        return {"ok": False, "message": "Ключ не сохранён"}
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    model = cfg.get("openai", {}).get("model") or "gpt-5"
+    r = requests.post(f"{OPENAI}/chat/completions", headers=headers, timeout=60,
+                      json={"model": model, "max_completion_tokens": 16,
+                            "messages": [{"role": "user", "content": "Ответь одним словом: готово"}]})
+    if r.status_code == 404:  # модели нет — ключ проверим по списку моделей
+        r2 = requests.get(f"{OPENAI}/models", headers=headers, timeout=20)
+        if r2.status_code == 200:
+            return {"ok": True, "message": f"Ключ работает; модели {model} нет — при запросе возьмётся актуальная"}
+        r = r2
+    if r.status_code == 200:
+        return {"ok": True, "message": f"Ключ работает, модель {model} отвечает"}
+    if r.status_code == 401:
+        return {"ok": False, "message": "OpenAI не принял ключ: проверьте, что он скопирован целиком"}
+    err = _api_error(r)
+    if r.status_code == 429 and "quota" in err.lower():
+        return {"ok": False, "message": "Ключ верный, но на счёте API нет средств: пополните баланс на "
+                                        "platform.openai.com (подписка ChatGPT Plus сюда не относится)"}
+    if r.status_code == 400 and "max_completion_tokens" in err:  # модель не дописала ответ — ключ рабочий
+        return {"ok": True, "message": f"Ключ работает, модель {model} отвечает"}
+    return {"ok": False, "message": f"OpenAI ответил ошибкой: {err[:200]}"}
+
+
+def _check_claude(cfg: dict) -> dict:
+    key = anthropic_key(cfg)
+    if not key:
+        return {"ok": False, "message": "Ключ не сохранён"}
+    model = cfg["claude"]["model"]
+    r = requests.post("https://api.anthropic.com/v1/messages", timeout=60,
+                      headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                               "content-type": "application/json"},
+                      json={"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ok"}]})
+    if r.status_code == 200:
+        return {"ok": True, "message": f"Ключ работает, модель {model} отвечает"}
+    err = _api_error(r)
+    if r.status_code == 401:
+        return {"ok": False, "message": "Anthropic не принял ключ: проверьте, что он скопирован целиком"}
+    if "credit balance" in err.lower():
+        return {"ok": False, "message": "Ключ верный, но на счёте API нет средств: пополните баланс в консоли "
+                                        "Anthropic (подписка Claude сюда не относится)"}
+    return {"ok": False, "message": f"Anthropic ответил ошибкой: {err[:200]}"}
 
 
 OPENAI = "https://api.openai.com/v1"

@@ -54,7 +54,7 @@ participant_bonus = 0.10     # люди из списка участников �
 # Умный поиск (вопросы по встречам): "claude-code", "claude", "gemini", "openai", "local" или "" — как у протоколов.
 # В облачных вариантах в облако уходят найденные фрагменты встреч.
 backend = ""
-gemini_model = "gemini-2.5-flash"   # если модель устареет, приложение само возьмёт актуальную «flash»
+gemini_model = "gemini-3.8-flash"   # если модель устареет, приложение само возьмёт актуальную «flash»
 
 [live]
 # Распознавать речь во время записи (только GigaAM и Whisper turbo, не от батареи):
@@ -93,7 +93,7 @@ keep_audio = true            # false — удалять аудио после у
 notify = true                # уведомление macOS, когда заметка готова
 
 [gemini]
-model = "gemini-2.5-flash"   # для протоколов: Flash есть в бесплатном уровне Google, Pro — точнее, но обычно платно
+model = "gemini-3.8-flash"   # для протоколов. Бесплатно: gemini-3.8-flash, gemini-3.6-flash, gemini-3.5-flash-lite, gemini-3.1-flash-lite
 
 [openai]
 model = "gpt-5"              # если модель устареет, приложение само возьмёт актуальную

@@ -1101,7 +1101,7 @@ function backendRadios(s) {
       ? "Без доплаты, расходует лимиты вашей подписки Claude. Протоколы точнее."
       : "Нужен установленный Claude Code с входом по подписке — сейчас он не найден.",
     "claude": s.anthropic_key_set ? "Оплата за запросы, примерно 0,2–0,4 $ за часовую встречу." : "Нужен платный ключ API — выберите этот вариант, и под ним появится поле для ключа.",
-    "gemini": s.gemini_key_set ? `Модель ${s.gemini_model}. У моделей Flash есть бесплатный лимит — можно без оплаты, только с ключом.`
+    "gemini": s.gemini_key_set ? `Модель ${s.gemini_model}. Модели Gemini 3.x Flash и Flash-Lite доступны бесплатно — нужен только ключ.`
       : "Нужен ключ Gemini API — выберите этот вариант, и под ним появится поле для ключа.",
     "openai": s.openai_key_set ? `Модель ${s.openai_model}, оплата за запросы по тарифу OpenAI (отдельно от подписки ChatGPT Plus).`
       : "Нужен платный ключ OpenAI API — выберите этот вариант, и под ним появится поле для ключа.",
@@ -1124,10 +1124,41 @@ const BACKEND_KEYS = {
               url: "https://platform.openai.com/api-keys" },
 };
 // Модели Gemini: список приходит от Google по ключу (S.geminiModels), пока его нет — основные.
-const GEMINI_PRESETS = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"];
+// Бесплатный уровень Gemini API (ноябрь 2026). Старее 3.1 не показываем — сервер их тоже не берёт.
+const GEMINI_PRESETS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
+
+// --- Проверка ключей API: крошечный пробный запрос к сервису (summarize.check_key) ---
+const KEY_SERVICE = { anthropic_key: "claude", gemini_key: "gemini", openai_key: "openai" };
+S.keyCheck = {};
+async function checkKey(service) {
+  S.keyCheck[service] = { loading: true };
+  repaintKeys();
+  try {
+    S.keyCheck[service] = await api("check_key", { method: "POST", body: { service } });
+  } catch (e) {
+    S.keyCheck[service] = { ok: false, message: e.message };
+  }
+  repaintKeys();
+}
+function repaintKeys() {
+  document.querySelectorAll("[data-key-result]").forEach((el) => { el.innerHTML = keyResultHtml(el.dataset.keyResult); });
+}
+function keyResultHtml(service) {
+  const r = S.keyCheck[service];
+  if (!r) return "";
+  if (r.loading) return '<span class="spinner"></span> проверяю ключ…';
+  return `<span class="badge ${r.ok ? "ok" : "err"}">${r.ok ? "работает" : "не работает"}</span> ${esc(r.message)}`;
+}
+function keyCheckHtml(service, saved) {
+  if (!saved) return "";
+  return `<div class="row"><button class="ghost small" type="button" data-check-key="${service}">Проверить ключ</button>
+    <span class="small" data-key-result="${service}">${keyResultHtml(service)}</span></div>`;
+}
 
 function geminiNote(id) {
-  if (id.includes("flash")) return " — есть бесплатный лимит";
+  if (id === GEMINI_PRESETS[0]) return " — бесплатно, основная";
+  if (id.includes("flash-lite") && GEMINI_PRESETS.includes(id)) return " — бесплатно, выше лимиты, проще";
+  if (GEMINI_PRESETS.includes(id)) return " — бесплатно";
   if (id.includes("pro")) return " — точнее, обычно только с оплатой";
   return "";
 }
@@ -1173,7 +1204,8 @@ function backendExtra(s, k) {
       <div class="field"><label>${key.title} ${saved ? '<span class="badge ok">сохранён</span>' : ""}</label>
         <div class="hint">Создайте ключ на <a href="${key.url}" target="_blank">${key.url.replace("https://", "")}</a> и вставьте сюда.</div>
         <div class="row"><input type="password" data-key-input="${key.field}" placeholder="${saved ? "•••••• — чтобы заменить, вставьте новый" : key.placeholder}" autocomplete="off">
-        <button class="ghost" type="button" data-key-save="${key.field}">Сохранить</button></div></div>
+        <button class="ghost" type="button" data-key-save="${key.field}">Сохранить</button></div>
+        ${keyCheckHtml(KEY_SERVICE[key.field], saved)}</div>
       ${k === "gemini" && saved ? geminiModelField(s) : ""}</div>`;
   }
   if (k !== "claude-code") return "";
@@ -1235,6 +1267,7 @@ function bindBackendRadios(root) {
       if (b.dataset.keySave === "hf_token") checkHf();
       if (b.dataset.keySave === "gemini_key") S.geminiModels = undefined;  // новый ключ — новый список
       rerender();
+      if (KEY_SERVICE[b.dataset.keySave]) checkKey(KEY_SERVICE[b.dataset.keySave]);
     } catch (e) {
       toast(e.message);
     }
@@ -1251,6 +1284,7 @@ function bindBackendRadios(root) {
   root.querySelectorAll("[data-gemini-model]").forEach((sel) => sel.addEventListener("change", async () => {
     try {
       S.settings = await api("settings", { method: "POST", body: { gemini_model: sel.value } });
+      delete S.keyCheck.gemini;
       toast("Модель Gemini: " + sel.value);
       rerender();
     } catch (e) {
@@ -1258,6 +1292,7 @@ function bindBackendRadios(root) {
     }
   }));
   root.querySelectorAll("[data-check-hf]").forEach((b) => b.addEventListener("click", checkHf));
+  root.querySelectorAll("[data-check-key]").forEach((b) => b.addEventListener("click", () => checkKey(b.dataset.checkKey)));
   root.querySelectorAll("[data-recheck-claude]").forEach((b) => b.addEventListener("click", async () => {
     S.settings = await api("settings").catch(() => S.settings);
     toast(S.settings.claude_code_path ? "Claude Code найден" : "Claude Code пока не найден — проверьте, что установка закончилась без ошибок", 5000);
@@ -1393,7 +1428,8 @@ function renderSettings() {
       <div class="hint">Нужен только для варианта «Claude API по ключу». Ключ создаётся на platform.claude.com, оплата отдельно от подписки.</div>
       <div class="field"><label for="sKey">Ключ API ${s.anthropic_key_set ? '<span class="badge ok">сохранён</span>' : ""}</label>
         <div class="row"><input type="password" id="sKey" placeholder="${s.anthropic_key_set ? "•••••• — чтобы заменить, вставьте новый" : "sk-ant-…"}" autocomplete="off">
-        <button class="ghost" id="sKeySave">Сохранить</button>${s.anthropic_key_set ? '<button class="ghost" id="sKeyDel">Удалить</button>' : ""}</div></div>
+        <button class="ghost" id="sKeySave">Сохранить</button>${s.anthropic_key_set ? '<button class="ghost" id="sKeyDel">Удалить</button>' : ""}</div>
+        ${keyCheckHtml("claude", s.anthropic_key_set)}</div>
       <div class="hint">Claude Code: ${s.claude_code_path ? `<span class="badge ok">найден</span> ${esc(s.claude_code_path)}` : '<span class="badge warn">не установлен</span>'}</div>
     </div>
 
@@ -1402,12 +1438,14 @@ function renderSettings() {
       <div class="field"><label for="sGemini">Ключ Gemini API ${s.gemini_key_set ? '<span class="badge ok">сохранён</span>' : ""}</label>
         <div class="hint">Создаётся на <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>.</div>
         <div class="row"><input type="password" id="sGemini" placeholder="${s.gemini_key_set ? "•••••• — чтобы заменить, вставьте новый" : "AIza…"}" autocomplete="off">
-        <button class="ghost" id="sGeminiSave">Сохранить</button>${s.gemini_key_set ? '<button class="ghost" id="sGeminiDel">Удалить</button>' : ""}</div></div>
+        <button class="ghost" id="sGeminiSave">Сохранить</button>${s.gemini_key_set ? '<button class="ghost" id="sGeminiDel">Удалить</button>' : ""}</div>
+        ${keyCheckHtml("gemini", s.gemini_key_set)}</div>
       ${s.gemini_key_set ? geminiModelField(s) : ""}
       <div class="field"><label for="sOpenai">Ключ OpenAI API ${s.openai_key_set ? '<span class="badge ok">сохранён</span>' : ""}</label>
         <div class="hint">Создаётся на <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com/api-keys</a>.</div>
         <div class="row"><input type="password" id="sOpenai" placeholder="${s.openai_key_set ? "•••••• — чтобы заменить, вставьте новый" : "sk-…"}" autocomplete="off">
-        <button class="ghost" id="sOpenaiSave">Сохранить</button>${s.openai_key_set ? '<button class="ghost" id="sOpenaiDel">Удалить</button>' : ""}</div></div>
+        <button class="ghost" id="sOpenaiSave">Сохранить</button>${s.openai_key_set ? '<button class="ghost" id="sOpenaiDel">Удалить</button>' : ""}</div>
+        ${keyCheckHtml("openai", s.openai_key_set)}</div>
       <div class="field"><label for="sOpenaiModel">Модель ChatGPT</label>
         <input type="text" id="sOpenaiModel" value="${esc(s.openai_model)}" placeholder="gpt-5"></div>
       <div class="hint">Если модель устареет, приложение само возьмёт актуальную.</div>
@@ -1454,15 +1492,15 @@ function renderSettings() {
   }));
   $("sGeminiSave").onclick = async () => {
     const v = $("sGemini").value.trim();
-    if (v && await save({ gemini_key: v }, "Ключ Gemini сохранён")) { S.geminiModels = undefined; renderSettings(); }
+    if (v && await save({ gemini_key: v }, "Ключ Gemini сохранён")) { S.geminiModels = undefined; renderSettings(); checkKey("gemini"); }
   };
   if ($("sGeminiDel")) $("sGeminiDel").onclick = async () => { if (await save({ gemini_key: "" }, "Ключ Gemini удалён")) renderSettings(); };
   $("sOpenaiSave").onclick = async () => {
     const v = $("sOpenai").value.trim();
-    if (v && await save({ openai_key: v }, "Ключ OpenAI сохранён")) renderSettings();
+    if (v && await save({ openai_key: v }, "Ключ OpenAI сохранён")) { renderSettings(); checkKey("openai"); }
   };
   if ($("sOpenaiDel")) $("sOpenaiDel").onclick = async () => { if (await save({ openai_key: "" }, "Ключ OpenAI удалён")) renderSettings(); };
-  $("sOpenaiModel").onchange = (e) => { if (e.target.value.trim()) save({ openai_model: e.target.value }, "Модель ChatGPT: " + e.target.value.trim()); };
+  $("sOpenaiModel").onchange = (e) => { if (e.target.value.trim()) { delete S.keyCheck.openai; save({ openai_model: e.target.value }, "Модель ChatGPT: " + e.target.value.trim()); } };
   $("sAuto").onchange = (e) => { save({ auto_record: e.target.checked }); native("reloadSettings"); };
   $("sKeepAudio").onchange = (e) => save({ keep_audio: e.target.checked });
   $("sReveal").onclick = () => api("reveal", { method: "POST", body: {} });
@@ -1473,7 +1511,7 @@ function renderSettings() {
   $("sHfCheck").onclick = checkHf;
   $("sKeySave").onclick = async () => {
     const v = $("sKey").value.trim();
-    if (v && await save({ anthropic_key: v }, "Ключ сохранён")) renderSettings();
+    if (v && await save({ anthropic_key: v }, "Ключ сохранён")) { renderSettings(); checkKey("claude"); }
   };
   if ($("sKeyDel")) $("sKeyDel").onclick = async () => { if (await save({ anthropic_key: "" }, "Ключ удалён")) renderSettings(); };
 }

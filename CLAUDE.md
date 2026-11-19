@@ -28,7 +28,7 @@ Meeting Agent.app
 - Протокол (`llm.backend`): `local` — mlx-lm в процессе; `claude-code` — `claude -p --tools "" --system-prompt …`
   во временной пустой папке, по подписке пользователя; `claude` — Anthropic API (`claude-opus-5-5`, effort medium,
   `fallbacks: "default"`). Ollama больше не используется: её реестр у пользователя недоступен.
-  `gemini` — Gemini API по REST (`.gemini_key`, gemini.model, по умолчанию gemini-2.5-flash — есть в бесплатном уровне;
+  `gemini` — Gemini API по REST (`.gemini_key`, gemini.model, по умолчанию gemini-3.8-flash — есть в бесплатном уровне, модели старше 3.1 скрыты и заменяются на неё;
   список моделей для выбора — `GET /api/gemini/models`); `openai` — OpenAI
   Chat Completions по REST (`.openai_key`, openai.model, по умолчанию gpt-5, без temperature). Обе модели при 404
   сами берут актуальную из списка моделей. Облачные варианты (`summarize.CLOUD`) получают расшифровку целиком.

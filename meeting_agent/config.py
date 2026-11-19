@@ -52,7 +52,7 @@ DEFAULTS = {
     },
     "names": {"guess": True},
     "live": {"enabled": True},
-    "ask": {"backend": "", "gemini_model": "gemini-2.5-flash"},
+    "ask": {"backend": "", "gemini_model": "gemini-3.8-flash"},
     "llm": {
         "backend": "local",
         "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
@@ -61,7 +61,7 @@ DEFAULTS = {
         "chunk_chars": 12000,
     },
     "claude": {"code_model": "", "model": "claude-opus-5-5", "effort": "medium", "api_key": ""},
-    "gemini": {"model": "gemini-2.5-flash"},
+    "gemini": {"model": "gemini-3.8-flash"},
     "openai": {"model": "gpt-5", "api_key": ""},
     "output": {"template": "meeting", "keep_audio": True, "notify": True},
 }

@@ -229,7 +229,7 @@ def _llm(cfg: dict, user: str) -> str:
         return chat_claude(cfg, user, SYSTEM)
     if b == "gemini":
         # Для поиска — быстрая «flash», а не модель протоколов.
-        return chat_gemini(cfg, user, SYSTEM, cfg.get("ask", {}).get("gemini_model") or "gemini-2.5-flash")
+        return chat_gemini(cfg, user, SYSTEM, cfg.get("ask", {}).get("gemini_model"))
     if b == "openai":
         return chat_openai(cfg, user, SYSTEM)
     # Qwen — в отдельном процессе: сервер не держит 4,5 ГБ модели в памяти между вопросами.

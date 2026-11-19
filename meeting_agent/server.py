@@ -235,6 +235,12 @@ def list_meetings(cfg: dict) -> list[dict]:
 
 # ---------- настройки ----------
 
+def _gemini_model(name):
+    from .summarize import gemini_model
+
+    return gemini_model(name)
+
+
 def get_settings(cfg: dict) -> dict:
     from . import ask as ask_mod
 
@@ -259,7 +265,7 @@ def get_settings(cfg: dict) -> dict:
         "ask_backend": ask_mod.backend(cfg),
         "ask_backends": ask_mod.BACKENDS,
         "gemini_key_set": bool(config.read_secret("gemini_key")),
-        "gemini_model": cfg.get("gemini", {}).get("model", "gemini-2.5-flash"),
+        "gemini_model": _gemini_model(cfg.get("gemini", {}).get("model")),
         "openai_key_set": bool(config.openai_key(cfg)),
         "openai_model": cfg.get("openai", {}).get("model", "gpt-5"),
         "voices_thresholds": {k: cfg["voices"][k] for k in ("match_threshold", "uncertain_threshold",
@@ -683,6 +689,11 @@ class Handler(BaseHTTPRequestHandler):
     def api_post_settings(self, q):
         save_settings(self._data())
         self._json(get_settings(config.load()))
+
+    def api_post_check_key(self, q):
+        from .summarize import check_key
+
+        self._json(check_key(str(self._data().get("service", "")), config.load()))
 
     def api_get_gemini_models(self, q):
         from .summarize import gemini_models
