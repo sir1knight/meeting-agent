@@ -1139,6 +1139,20 @@ async function checkKey(service) {
     S.keyCheck[service] = { ok: false, message: e.message };
   }
   repaintKeys();
+  // Gemini: ключ и модель на месте — вторым шагом пробная генерация (регион, лимиты); бывает долгой.
+  if (service === "gemini" && S.keyCheck.gemini.ok) {
+    const quick = S.keyCheck.gemini;
+    S.keyCheck.gemini = { ...quick, generating: true };
+    repaintKeys();
+    let full;
+    try {
+      full = await api("check_key", { method: "POST", body: { service, full: true } });
+    } catch (e) {
+      full = { ok: false, message: e.message };
+    }
+    S.keyCheck.gemini = { ok: full.ok, message: `${quick.message}. ${full.message}` };
+    repaintKeys();
+  }
 }
 function repaintKeys() {
   document.querySelectorAll("[data-key-result]").forEach((el) => { el.innerHTML = keyResultHtml(el.dataset.keyResult); });
@@ -1147,6 +1161,7 @@ function keyResultHtml(service) {
   const r = S.keyCheck[service];
   if (!r) return "";
   if (r.loading) return '<span class="spinner"></span> проверяю ключ…';
+  if (r.generating) return `<span class="badge ok">ключ работает</span> ${esc(r.message)}. <span class="spinner"></span> пробую сгенерировать ответ — бывает до минуты…`;
   return `<span class="badge ${r.ok ? "ok" : "err"}">${r.ok ? "работает" : "не работает"}</span> ${esc(r.message)}`;
 }
 function keyCheckHtml(service, saved) {

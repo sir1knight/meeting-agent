@@ -693,7 +693,8 @@ class Handler(BaseHTTPRequestHandler):
     def api_post_check_key(self, q):
         from .summarize import check_key
 
-        self._json(check_key(str(self._data().get("service", "")), config.load()))
+        data = self._data()
+        self._json(check_key(str(data.get("service", "")), config.load(), bool(data.get("full"))))
 
     def api_get_gemini_models(self, q):
         from .summarize import gemini_models

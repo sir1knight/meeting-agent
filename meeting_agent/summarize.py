@@ -279,11 +279,12 @@ def _pick_gemini_model(headers: dict, family: str) -> str:
 
 # ---------- проверка ключей ----------
 
-def check_key(service: str, cfg: dict) -> dict:
-    """Пробный запрос к сервису по сохранённому ключу: {ok, message}. Тратит один крошечный запрос."""
+def check_key(service: str, cfg: dict, full: bool = False) -> dict:
+    """Пробный запрос к сервису по сохранённому ключу: {ok, message}.
+    Gemini: full=False — быстрая проверка ключа и модели, full=True — ещё и пробная генерация (регион, лимиты)."""
     try:
         if service == "gemini":
-            return _check_gemini(cfg)
+            return _check_gemini_generate(cfg) if full else _check_gemini(cfg)
         if service == "openai":
             return _check_openai(cfg)
         if service == "claude":
@@ -312,6 +313,46 @@ def _check_gemini(cfg: dict) -> dict:
     if r.status_code in (400, 401, 403):
         return {"ok": False, "message": f"Google не принял ключ: {_api_error(r)[:200]}"}
     return {"ok": False, "message": f"Google ответил ошибкой {r.status_code}: {_api_error(r)[:200]}"}
+
+
+def _gemini_status(r: requests.Response) -> str:
+    try:
+        return (r.json().get("error") or {}).get("status") or ""
+    except ValueError:
+        return ""
+
+
+def _check_gemini_generate(cfg: dict) -> dict:
+    """Полная проверка: минимальный generateContent. Показывает то, чего не видно по ключу:
+    доступна ли генерация в регионе и не исчерпаны ли бесплатные лимиты. Тратит один запрос из лимита."""
+    key = config.read_secret("gemini_key")
+    if not key:
+        return {"ok": False, "message": "Ключ не сохранён"}
+    model = gemini_model(cfg.get("gemini", {}).get("model"))
+    try:
+        r = _http("POST", f"{GEMINI}/models/{model}:generateContent", timeout=180,
+                  headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                  json={"contents": [{"parts": [{"text": "Ответь одним словом: OK"}]}]})
+    except requests.Timeout:
+        return {"ok": True, "message": f"Ключ рабочий, но {model} не ответила за 3 минуты — на бесплатном уровне "
+                                       "бывает очередь. Протоколы это не ломает: там приложение ждёт дольше."}
+    status = _gemini_status(r)
+    if r.status_code == 200:
+        return {"ok": True, "message": f"Генерация работает: модель {model} отвечает, лимиты не исчерпаны"}
+    if r.status_code == 429 or status == "RESOURCE_EXHAUSTED":
+        return {"ok": False, "message": f"Ключ рабочий, но лимит запросов {model} исчерпан (в минуту или за день) "
+                                        "или для проекта нулевая бесплатная квота. Попробуйте позже или другую модель."}
+    if r.status_code == 403 or status == "PERMISSION_DENIED":
+        return {"ok": False, "message": "Доступ запрещён: в проекте Google Cloud не включён Generative Language API, "
+                                        "на ключ наложены ограничения (IP, сервисы) или регион не поддерживается. "
+                                        f"Ответ Google: {_api_error(r)[:150]}"}
+    if "location" in _api_error(r).lower():
+        return {"ok": False, "message": "Google не обслуживает запросы из вашего региона: нужен VPN. "
+                                        f"Ответ Google: {_api_error(r)[:150]}"}
+    if r.status_code == 400 and "API_KEY_INVALID" in r.text:
+        return {"ok": False, "message": "Ключ не принят: опечатка, ключ удалён или ещё не активировался "
+                                        "(после создания подождите 1–2 минуты)"}
+    return {"ok": False, "message": f"Генерация не прошла ({r.status_code} {status}): {_api_error(r)[:200]}"}
 
 
 def _check_openai(cfg: dict) -> dict:
