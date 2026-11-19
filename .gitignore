@@ -1,0 +1,22 @@
+# Секреты: ключи и токены никогда не попадают в репозиторий
+.hf_token
+.anthropic_key
+.gemini_key
+.openai_key
+*.key
+settings.json
+
+# Окружение, сборки, скачанные модели
+.venv/
+build/
+bin/
+models/
+__pycache__/
+*.pyc
+
+# Записи встреч и расшифровки
+*.wav
+*.m4a
+*.mp3
+
+.DS_Store

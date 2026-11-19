@@ -1,0 +1,19 @@
+# Пакеты Windows-версии (ставятся build_windows.sh на этом Mac готовыми колёсами win_amd64).
+# Вместо mlx-whisper — faster-whisper (CTranslate2), вместо mlx-lm — llama-cpp-python (llama.cpp, процессор).
+faster-whisper>=1.1
+llama-cpp-python==0.3.19   # последняя версия с готовой сборкой для Windows (процессор)
+soundcard>=0.4.3
+pywebview>=5.3
+pystray>=0.19
+pillow>=10
+soundfile>=0.12
+numpy>=1.26
+requests>=2.31
+anthropic>=1.0
+huggingface_hub>=0.24
+transformers>=4.45
+pyannote.audio==4.0.7
+torch>=2.2
+hydra-core>=1.3
+omegaconf>=2.3
+sentencepiece>=0.2

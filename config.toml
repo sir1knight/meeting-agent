@@ -1,0 +1,99 @@
+# Настройки Meeting Agent. Все пути с ~ раскрываются в домашнюю папку.
+
+[paths]
+recordings = "~/MeetingAgent/recordings"   # сырые записи встреч
+notes = "~/MeetingAgent/notes"             # готовые заметки (markdown)
+voices = "~/MeetingAgent/voices"           # слепки голоса собеседников
+
+[zoom]
+bundle_id = "us.zoom.xos"
+# Заголовки окна, по которым агент понимает, что идёт встреча.
+# Если не срабатывает — запустите `./agent windows` во время встречи и добавьте нужный.
+window_titles = ["Zoom Meeting", "Zoom Webinar", "Конференция Zoom", "Вебинар Zoom"]
+poll_seconds = 3
+start_after_polls = 2        # сколько проверок подряд окно должно быть на месте
+stop_grace_seconds = 30      # сколько ждать после исчезновения окна, прежде чем остановить запись
+min_duration_seconds = 60    # более короткие записи не обрабатываются
+
+[speakers]
+me = "Я"                     # как подписывать вашу речь (микрофон)
+others_prefix = "Собеседник"
+
+[whisper]
+# Чем распознавать речь: "whisper-turbo" (быстро), "whisper-large" (точнее, 3 ГБ), "gigaam" (GigaAM-v3, русский, 450 МБ)
+engine = "whisper-turbo"
+model = "mlx-community/whisper-large-v3-turbo"
+language = "ru"              # "" — определять автоматически
+# Термины, которые часто звучат на ваших встречах: улучшают распознавание.
+glossary = ["Zoom", "API", "MVP", "бэклог", "спринт", "релиз", "дедлайн"]
+
+[diarization]
+enabled = true               # нужен пакет pyannote (ставится через setup.sh по желанию)
+model = "pyannote/speaker-diarization-3.1"
+hf_token = ""                # или файл .hf_token рядом с этим конфигом, или переменная HF_TOKEN
+device = "mps"               # "mps" (видеоядра M1) или "cpu"
+min_speakers = 0             # 0 — не ограничивать
+max_speakers = 0
+# Уточнение разметки: реплику, голос которой явно похож на другого собеседника (сходство ≥ refine_min_sim
+# и выше, чем со «своим», на refine_margin), переносим к нему.
+refine = true
+refine_min_sim = 0.5
+refine_margin = 0.15
+
+[voices]
+# Слепки голоса: узнавать собеседников по голосу на следующих встречах (нужно разделение собеседников).
+enabled = true
+match_threshold = 0.75       # сходство ≥ этого — подставляем имя (по калибровке на реальной встрече: свой голос 0,84–0,92, чужие ≤ 0,54)
+uncertain_threshold = 0.55   # между порогами — имя со знаком «?»; ниже — «Собеседник N»
+min_speech_seconds = 15      # если человек говорил меньше, слепок ненадёжен: имя только со знаком «?»
+method = "max"               # "max" — лучшее совпадение с любой прошлой встречей; "centroid" — с усреднённым голосом
+max_embeddings = 20          # сколько встреч помнить в одном слепке
+participant_bonus = 0.10     # люди из списка участников встречи узнаются при пороге ниже на столько
+
+[ask]
+# Умный поиск (вопросы по встречам): "claude-code", "claude", "gemini", "openai", "local" или "" — как у протоколов.
+# В облачных вариантах в облако уходят найденные фрагменты встреч.
+backend = ""
+gemini_model = "gemini-2.5-flash"   # если модель устареет, приложение само возьмёт актуальную «flash»
+
+[live]
+# Распознавать речь во время записи (только GigaAM и Whisper turbo, не от батареи):
+# после встречи остаётся разделить собеседников и составить протокол.
+enabled = true
+
+[names]
+# Предполагаемые имена по разговору («Олег, что у тебя?» → «Олег*»). Угадывает модель протокола (llm.backend).
+guess = true
+
+[llm]
+# Кто пишет протокол:
+#   "local"       — модель на этом Mac, ничего не уходит в сеть;
+#   "claude-code" — Claude Code по подписке Claude (без доплаты, тратит лимиты подписки);
+#   "claude"      — Claude API по платному ключу;
+#   "gemini"      — Gemini API по ключу (файл .gemini_key, вводится в окне приложения);
+#   "openai"      — ChatGPT через OpenAI API по ключу (файл .openai_key или OPENAI_API_KEY).
+# Во всех облачных вариантах ТЕКСТ РАСШИФРОВКИ ОТПРАВЛЯЕТСЯ В ОБЛАКО (Anthropic, Google или OpenAI).
+# Звук в любом случае расшифровывается локально.
+backend = "local"
+# Модель MLX с Hugging Face (скачивается один раз через setup.sh, дальше работает офлайн).
+model = "mlx-community/Qwen2.5-7B-Instruct-4bit"
+max_tokens = 3000            # предел длины ответа модели
+temperature = 0.2
+chunk_chars = 12000          # длинные расшифровки режутся на куски такого размера
+
+[claude]
+code_model = ""              # для claude-code: "" — модель по умолчанию в Claude Code, или opus / sonnet
+model = "claude-opus-5-5"    # для claude (API)
+effort = "medium"            # low | medium | high — глубже = дольше и дороже
+api_key = ""                 # или файл .anthropic_key рядом с этим конфигом, или ANTHROPIC_API_KEY
+
+[output]
+template = "meeting"         # meeting | standup | client | interview (папка templates/)
+keep_audio = true            # false — удалять аудио после успешной обработки
+notify = true                # уведомление macOS, когда заметка готова
+
+[gemini]
+model = "gemini-2.5-flash"   # для протоколов: Flash есть в бесплатном уровне Google, Pro — точнее, но обычно платно
+
+[openai]
+model = "gpt-5"              # если модель устареет, приложение само возьмёт актуальную

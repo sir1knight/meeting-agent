@@ -1,0 +1,540 @@
+"""Meeting Agent для Windows: значок в трее, окно (Edge WebView2 через pywebview), запись встреч.
+То же, что на Mac делает оболочка на Swift (app/*.swift): запускает сервер, следит за окном
+встречи Zoom, пишет звук (winrec.py) и отдаёт запись серверу на обработку.
+
+Запуск: «Meeting Agent.exe» → python\\pythonw.exe -m meeting_agent winapp
+"""
+
+import ctypes
+import json
+import logging
+import os
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+from . import osutil
+
+log = logging.getLogger("winapp")
+
+HOME = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "Meeting Agent"
+APP_ROOT = Path(__file__).resolve().parent.parent          # …\Meeting Agent\app
+EXE = os.environ.get("MEETING_AGENT_EXE") or str(APP_ROOT.parent / "Meeting Agent.exe")
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+TITLE = "Meeting Agent"
+
+
+def _message(text: str, title: str = TITLE) -> None:
+    ctypes.windll.user32.MessageBoxW(None, text, title, 0x40)  # MB_ICONINFORMATION
+
+
+def _free_port() -> int:
+    import socket
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+# ---------- сервер ----------
+
+class Backend:
+    """python -m meeting_agent serve в фоне, без окна консоли; перезапуск, если упал."""
+
+    def __init__(self):
+        self.port = _free_port()
+        self.token = uuid.uuid4().hex
+        self.proc: subprocess.Popen | None = None
+        self.stopping = False
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}/#token={self.token}"
+
+    def start(self) -> None:
+        python = Path(sys.executable).with_name("python.exe")  # сами мы — pythonw.exe
+        env = dict(os.environ, PYTHONPATH=str(APP_ROOT), PYTHONUNBUFFERED="1", PYTHONDONTWRITEBYTECODE="1",
+                   PYTHONUTF8="1", MEETING_AGENT_HOME=str(HOME), MEETING_AGENT_TOKEN=self.token,
+                   MEETING_AGENT_PARENT_PID=str(os.getpid()), HF_HOME=str(HOME / "huggingface"),
+                   HF_HUB_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1", TOKENIZERS_PARALLELISM="false",
+                   HF_HUB_DISABLE_SYMLINKS_WARNING="1")
+        logs = HOME / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        current = logs / "backend.log"
+        if current.exists():
+            current.replace(logs / "backend.prev.log")
+        out = open(current, "ab")
+        self.proc = subprocess.Popen([str(python), "-m", "meeting_agent", "serve", "--port", str(self.port)],
+                                     cwd=APP_ROOT, env=env, stdout=out, stderr=subprocess.STDOUT,
+                                     creationflags=osutil.CREATE_NO_WINDOW)
+        threading.Thread(target=self._watch, daemon=True).start()
+
+    def _watch(self) -> None:
+        restarts = 0
+        while not self.stopping:
+            rc = self.proc.wait()
+            if self.stopping:
+                return
+            restarts += 1
+            log.warning("Сервер завершился (код %s), перезапускаю", rc)
+            time.sleep(min(30, restarts * 2))
+            self.start()
+            return
+
+    def wait_ready(self, timeout: float = 120) -> bool:
+        end = time.time() + timeout
+        while time.time() < end:
+            if self.get("status") is not None:
+                return True
+            time.sleep(0.25)
+        return False
+
+    def stop(self) -> None:
+        self.stopping = True
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+
+    def request(self, path: str, body: dict | None = None) -> dict | None:
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}/api/{path}",
+                                     data=json.dumps(body).encode() if body is not None else None,
+                                     headers={"X-Token": self.token, "Content-Type": "application/json"},
+                                     method="POST" if body is not None else "GET")
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read() or b"{}")
+        except Exception:
+            return None
+
+    def get(self, path: str) -> dict | None:
+        return self.request(path)
+
+    def post(self, path: str, body: dict) -> dict | None:
+        return self.request(path, body)
+
+
+# ---------- запись ----------
+
+class Recording:
+    """Порт app/Recording.swift: ручная запись и автозапись по окну встречи Zoom."""
+
+    def __init__(self, backend: Backend):
+        self.backend = backend
+        self.recorder = None
+        self.source: str | None = None       # "manual" | "zoom"
+        self.since: float | None = None
+        self.busy = False
+        self.lock = threading.RLock()
+        self.on_change = lambda: None
+        self.auto_record = True
+        self.window_titles = ["Zoom Meeting", "Zoom Webinar", "Конференция Zoom", "Вебинар Zoom"]
+        self.poll = 3.0
+        self.start_after = 2
+        self.stop_grace = 30.0
+        self.min_duration = 60.0
+        self.recordings = Path.home() / "MeetingAgent" / "recordings"
+        self.hits = 0
+        self.last_seen = 0.0
+        self.skip_meeting = False  # запись остановили вручную, окно встречи ещё открыто
+
+    @property
+    def is_recording(self) -> bool:
+        return self.recorder is not None
+
+    def reload_settings(self) -> None:
+        s = self.backend.get("settings")
+        if not s:
+            return
+        self.auto_record = s.get("auto_record", True)
+        self.window_titles = s.get("window_titles") or self.window_titles
+        self.recordings = Path(s.get("recordings_dir") or self.recordings)
+        z = s.get("zoom") or {}
+        self.poll = float(z.get("poll_seconds", self.poll))
+        self.start_after = int(z.get("start_after_polls", self.start_after))
+        self.stop_grace = float(z.get("stop_grace_seconds", self.stop_grace))
+        self.min_duration = float(z.get("min_duration_seconds", self.min_duration))
+        self.on_change()
+
+    def set_auto(self, on: bool) -> None:
+        self.auto_record = on
+        self.backend.post("settings", {"auto_record": on})
+        self.on_change()
+
+    def watch(self) -> None:
+        from .detect import in_meeting
+
+        while True:
+            time.sleep(self.poll)
+            try:
+                self._tick(in_meeting(self.window_titles))
+            except Exception:
+                log.exception("Проверка окна Zoom не удалась")
+
+    def _tick(self, active: bool) -> None:
+        if self.busy:
+            return
+        now = time.time()
+        if active:
+            self.last_seen = now
+        if not self.is_recording:
+            if self.skip_meeting:
+                self.hits = 0
+                if now - self.last_seen > self.stop_grace:  # встреча закончилась — снова ждём следующую
+                    self.skip_meeting = False
+                    self.notify_backend()
+                    self.on_change()
+                return
+            if not self.auto_record:
+                self.hits = 0
+                return
+            self.hits = self.hits + 1 if active else 0
+            if self.hits >= self.start_after:
+                self.hits = 0
+                self.start("zoom")
+        elif self.source == "zoom" and now - self.last_seen > self.stop_grace:
+            self.stop("окно встречи закрыто")
+
+    def toggle_manual(self) -> None:
+        if self.is_recording:
+            self.stop_by_user("остановлено вручную")
+        else:
+            self.start("manual")
+
+    def stop_by_user(self, reason: str) -> None:
+        """Без этого автозапись через пару проверок начала бы новую запись той же встречи."""
+        if not self.is_recording:
+            return
+        if self.source == "zoom" or time.time() - self.last_seen <= self.stop_grace:
+            self.skip_meeting = True
+        self.stop(reason)
+
+    def start(self, source: str) -> None:
+        from .winrec import MeetingRecorder
+
+        with self.lock:
+            if self.is_recording or self.busy:
+                return
+            self.busy = True
+        try:
+            folder = self.recordings / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            rec = MeetingRecorder(folder)
+            try:
+                rec.start()
+            except Exception as e:
+                import shutil
+
+                shutil.rmtree(folder, ignore_errors=True)
+                log.error("Не удалось начать запись: %s", e)
+                self.notify_backend(error=str(e))
+                threading.Thread(target=_message, args=(f"Не удалось начать запись.\n\n{e}",), daemon=True).start()
+                return
+            self.recorder, self.source, self.since, self.last_seen = rec, source, time.time(), time.time()
+            log.info("Запись началась (%s): %s", source, folder.name)
+            self.notify_backend()
+            self.on_change()
+        finally:
+            self.busy = False
+
+    def stop(self, reason: str) -> None:
+        with self.lock:
+            rec = self.recorder
+            if rec is None or self.busy:
+                return
+            self.busy = True
+        try:
+            started, src = self.since or time.time(), self.source
+            rec.stop()
+            self.recorder = self.source = self.since = None
+            length = time.time() - started
+            # Случайно открытое окно Zoom на пару секунд — не встреча.
+            too_short = length < self.min_duration if src == "zoom" else length < 3
+            if too_short:
+                import shutil
+
+                shutil.rmtree(rec.folder, ignore_errors=True)
+            else:
+                self.backend.post("process", {"folder": str(rec.folder)})
+            log.info("Запись остановлена (%s), %d с", reason, length)
+        finally:
+            self.busy = False
+        self.notify_backend()
+        self.on_change()
+
+    def notify_backend(self, error: str | None = None) -> None:
+        body: dict = {"state": "recording" if self.is_recording else "idle"}
+        if self.since:
+            body["since"] = self.since
+        if self.source:
+            body["source"] = self.source
+        if self.recorder:
+            body["folder"] = str(self.recorder.folder)
+        if error:
+            body["error"] = error
+        if self.skip_meeting and not self.is_recording:
+            body["skip_meeting"] = True
+        self.backend.post("recording", body)
+
+    def status_text(self) -> str:
+        if self.is_recording:
+            mins = int((time.time() - (self.since or time.time())) / 60)
+            return ("Идёт запись встречи Zoom" if self.source == "zoom" else "Идёт запись") + f" · {mins} мин"
+        if self.skip_meeting:
+            return "Запись остановлена — эту встречу больше не записываю"
+        return "Жду встречу в Zoom" if self.auto_record else "Автозапись выключена"
+
+
+# ---------- автозапуск и ярлык ----------
+
+def autostart_enabled() -> bool:
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            winreg.QueryValueEx(k, TITLE)
+            return True
+    except OSError:
+        return False
+
+
+def set_autostart(on: bool) -> None:
+    import winreg
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+        if on:
+            winreg.SetValueEx(k, TITLE, 0, winreg.REG_SZ, f'"{EXE}"')
+        else:
+            try:
+                winreg.DeleteValue(k, TITLE)
+            except OSError:
+                pass
+
+
+def ensure_start_menu_shortcut() -> None:
+    """Ярлык в меню «Пуск» (один раз и после переноса папки приложения)."""
+    programs = Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs"
+    link = programs / f"{TITLE}.lnk"
+    marker = HOME / "shortcut.txt"
+    if link.exists() and marker.exists() and marker.read_text(encoding="utf-8") == EXE:
+        return
+    ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{link}');"
+          f"$s.TargetPath='{EXE}';$s.WorkingDirectory='{Path(EXE).parent}';$s.Save()")
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                       capture_output=True, creationflags=osutil.CREATE_NO_WINDOW)
+    if r.returncode == 0:
+        marker.write_text(EXE, encoding="utf-8")
+        if autostart_enabled():
+            set_autostart(True)  # путь к программе мог поменяться
+
+
+# ---------- окно и трей ----------
+
+class App:
+    def __init__(self):
+        self.backend = Backend()
+        self.recording = Recording(self.backend)
+        self.window = None
+        self.icon = None
+        self.processing = 0
+        self.failed = 0
+        self.seen_done: set[str] = set()
+        self.quitting = False
+
+    # --- команды из окна (app.js → native()) ---
+    def command(self, msg: dict) -> bool:
+        cmd = (msg or {}).get("cmd")
+        if cmd == "startRecording" and not self.recording.is_recording:
+            threading.Thread(target=self.recording.start, args=("manual",), daemon=True).start()
+        elif cmd == "stopRecording":
+            threading.Thread(target=self.recording.stop_by_user, args=("остановлено в окне",), daemon=True).start()
+        elif cmd == "reloadSettings":
+            threading.Thread(target=self.recording.reload_settings, daemon=True).start()
+        elif cmd == "openURL" and str(msg.get("url", "")).startswith(("https://", "http://")):
+            import webbrowser
+
+            webbrowser.open(msg["url"])
+        return True
+
+    def event(self, name: str) -> None:
+        if self.window:
+            try:
+                self.window.evaluate_js(f"window.agentEvent && window.agentEvent('{name}')")
+            except Exception:
+                pass
+
+    def show_window(self, view: str | None = None) -> None:
+        if self.window:
+            self.window.show()
+            self.window.restore()
+            if view:
+                self.event(view)
+
+    # --- трей ---
+    def _image(self):
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        if self.recording.is_recording:
+            d.ellipse((6, 6, 58, 58), fill=(229, 72, 77, 255))
+        else:
+            d.ellipse((2, 2, 62, 62), fill=(47, 111, 228, 255))
+            for i, h in enumerate((14, 30, 22, 36, 18)):  # «волна»
+                x = 13 + i * 9
+                d.rounded_rectangle((x, 32 - h // 2, x + 5, 32 + h // 2), 2, fill="white")
+        return img
+
+    def _menu(self):
+        import pystray as ps
+
+        r = self.recording
+
+        def status(_):
+            text = r.status_text()
+            if not r.is_recording and self.processing:
+                text = f"Обработка встреч: {self.processing}"
+            return text
+
+        def toggle_auto(*_):
+            r.set_auto(not r.auto_record)
+
+        def toggle_login(*_):
+            try:
+                set_autostart(not autostart_enabled())
+            except OSError as e:
+                _message(f"Не удалось изменить автозапуск: {e}")
+
+        return ps.Menu(
+            ps.MenuItem(status, None, enabled=False),
+            ps.MenuItem(lambda _: f"Не удалось обработать: {self.failed} — подробности в окне", None,
+                        enabled=False, visible=lambda _: self.failed > 0),
+            ps.Menu.SEPARATOR,
+            ps.MenuItem("Открыть Meeting Agent", lambda *_: self.show_window(), default=True),
+            ps.MenuItem(lambda _: "Остановить запись" if r.is_recording else "Записать сейчас",
+                        lambda *_: threading.Thread(target=r.toggle_manual, daemon=True).start()),
+            ps.Menu.SEPARATOR,
+            ps.MenuItem("Записывать встречи Zoom автоматически", toggle_auto, checked=lambda _: r.auto_record),
+            ps.MenuItem("Запускать при входе в Windows", toggle_login, checked=lambda _: autostart_enabled()),
+            ps.Menu.SEPARATOR,
+            ps.MenuItem("Настройки…", lambda *_: self.show_window("settings")),
+            ps.MenuItem("Выйти из Meeting Agent", lambda *_: self.quit()),
+        )
+
+    def refresh(self) -> None:
+        if self.icon:
+            self.icon.icon = self._image()
+            self.icon.title = self.recording.status_text()
+            self.icon.update_menu()
+        self.event("status")
+
+    # --- состояние обработки: значок и уведомления о готовых заметках ---
+    def poll_status(self) -> None:
+        while not self.quitting:
+            time.sleep(4)
+            s = self.backend.get("status")
+            if not s:
+                continue
+            jobs = s.get("jobs") or []
+            self.processing = sum(j.get("status") in ("queued", "running") for j in jobs)
+            self.failed = sum(j.get("status") == "error" for j in jobs)
+            for j in jobs:
+                if j.get("status") == "done" and j["id"] not in self.seen_done:
+                    self.seen_done.add(j["id"])
+                    if j.get("note") and self.icon:
+                        self.icon.notify(Path(j["note"]).stem, "Заметка готова")
+            if self.icon:
+                self.icon.title = self.recording.status_text()
+
+    def quit(self) -> None:
+        self.quitting = True
+        if self.recording.is_recording:
+            self.recording.stop("выход из приложения")  # дописываем файлы, обработается при следующем запуске
+        self.backend.stop()
+        if self.icon:
+            self.icon.stop()
+        if self.window:
+            self.window.destroy()
+
+    def run(self) -> None:
+        import pystray
+        import webview
+
+        self.backend.start()
+        if not self.backend.wait_ready():
+            _message("Не удалось запустить Meeting Agent. Подробности — в файле\n"
+                     f"{HOME / 'logs' / 'backend.log'}")
+            self.backend.stop()
+            return
+        self.recording.on_change = self.refresh
+        self.recording.reload_settings()
+        self.recording.notify_backend()
+        threading.Thread(target=self.recording.watch, daemon=True).start()
+        threading.Thread(target=self.poll_status, daemon=True).start()
+        try:
+            ensure_start_menu_shortcut()
+        except Exception as e:
+            log.warning("Ярлык в меню «Пуск» не создан: %s", e)
+
+        self.icon = pystray.Icon("MeetingAgent", self._image(), TITLE, self._menu())
+        threading.Thread(target=self.icon.run, daemon=True).start()
+
+        self.window = webview.create_window(TITLE, self.backend.url, width=1180, height=780, min_size=(820, 560),
+                                            js_api=Bridge(self), text_select=True)
+
+        def closing():
+            if self.quitting:
+                return True
+            self.window.hide()  # закрытие окна прячет его: запись и автозапись продолжают работать
+            return False
+
+        self.window.events.closing += closing
+        webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
+        webview.start(gui="edgechromium", private_mode=False, storage_path=str(HOME / "webview"))
+        self.quitting = True
+        self.backend.stop()
+
+
+class Bridge:
+    """window.pywebview.api.command({cmd, …}) из app.js."""
+
+    def __init__(self, app: App):
+        self._app = app
+
+    def command(self, msg):
+        return self._app.command(msg)
+
+
+def _already_running() -> bool:
+    """Второй запуск: показываем окно уже работающей копии и выходим."""
+    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\MeetingAgentApp")
+    if ctypes.windll.kernel32.GetLastError() != 183:  # ERROR_ALREADY_EXISTS
+        return False
+    hwnd = ctypes.windll.user32.FindWindowW(None, TITLE)
+    if hwnd:
+        ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        ctypes.windll.user32.SetForegroundWindow(hwnd)
+    else:
+        _message("Meeting Agent уже запущен — его значок в трее, рядом с часами.")
+    return True
+
+
+def main() -> None:
+    HOME.mkdir(parents=True, exist_ok=True)
+    (HOME / "logs").mkdir(exist_ok=True)
+    # force: cli.main уже настроил вывод в stderr, а у pythonw.exe его нет.
+    logging.basicConfig(filename=HOME / "logs" / "app.log", level=logging.INFO, encoding="utf-8", force=True,
+                        format="%(asctime)s  %(name)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # чёткий текст на экранах с масштабом
+    except Exception:
+        pass
+    if _already_running():
+        return
+    try:
+        App().run()
+    except Exception as e:
+        log.exception("Сбой приложения")
+        _message(f"Meeting Agent завершился с ошибкой:\n{e}\n\nЖурнал: {HOME / 'logs' / 'app.log'}")

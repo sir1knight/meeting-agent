@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meeting Agent</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="side-head">
+      <div class="brand">Встречи</div>
+      <button id="recordBtn" class="rec-btn" title="Записать сейчас (весь звук системы и микрофон)">
+        <span class="dot"></span><span class="label">Записать</span>
+      </button>
+    </div>
+    <div id="recBanner" class="rec-banner" hidden>
+      <span class="pulse"></span>
+      <span id="recText">Идёт запись</span>
+      <button id="recPeople" class="link" title="Кто на этой встрече">Участники</button>
+      <button id="recStop" class="link">Остановить</button>
+    </div>
+    <button id="nextPeople" class="next-people" title="Имена помогают распознать речь и узнать собеседников"></button>
+    <input id="search" type="search" placeholder="Найти или спросить о встречах…" title="Enter — задать вопрос по всем встречам">
+    <div id="jobs"></div>
+    <nav id="list" aria-label="Список встреч"></nav>
+    <div class="side-foot">
+      <button id="importBtn" class="ghost" title="Импортировать аудиофайл">＋ Импорт</button>
+      <button id="voicesBtn" class="ghost" title="Слепки голоса собеседников">Голоса</button>
+      <button id="settingsBtn" class="ghost">Настройки</button>
+      <input id="fileInput" type="file" accept="audio/*,video/mp4,video/quicktime,.m4a,.mp3,.wav,.ogg,.opus,.webm,.flac" hidden>
+    </div>
+  </aside>
+
+  <main id="main">
+    <section id="empty" class="empty">
+      <h1>Здесь появятся протоколы встреч</h1>
+      <p>Когда начнётся встреча в Zoom, запись включится сама. После звонка Meeting Agent расшифрует разговор и составит протокол: кратко, решения, задачи и открытые вопросы.</p>
+      <p class="muted">Можно и вручную: кнопка «Записать» слева или перетащите сюда аудиофайл, например запись с диктофона.</p>
+    </section>
+
+    <section id="meeting" hidden>
+      <header class="m-head">
+        <h1 id="mTitle"></h1>
+        <div id="mMeta" class="meta"></div>
+        <div id="mSpeakers" class="chips" aria-label="Участники"></div>
+        <div class="toolbar">
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-tab="summary" role="tab">Протокол</button>
+            <button class="tab" data-tab="transcript" role="tab">Расшифровка</button>
+          </div>
+          <div class="actions">
+            <button id="copyBtn" class="ghost" title="Скопировать протокол в буфер обмена">Копировать</button>
+            <button id="redoBtn" class="ghost">Пересоздать…</button>
+            <button id="revealBtn" class="ghost" title="Показать файл заметки в Finder">В Finder</button>
+            <button id="deleteBtn" class="ghost danger">Удалить</button>
+          </div>
+        </div>
+      </header>
+      <article id="mBody" class="md"></article>
+    </section>
+
+    <section id="ask" hidden>
+      <div class="page">
+        <div class="ask-head"><h1>Вопросы по встречам</h1><button class="ghost" id="askNew">Новый разговор</button></div>
+        <div id="askLog"></div>
+        <form id="askForm" class="ask-form">
+          <textarea id="askInput" rows="2" placeholder="Например: когда обсуждали передачу PPAN? Что решили вчера? Какие задачи на мне?"></textarea>
+          <button class="primary" type="submit">Спросить</button>
+        </form>
+        <div id="askNote" class="muted small"></div>
+      </div>
+    </section>
+    <section id="voices" hidden></section>
+    <section id="settings" hidden></section>
+    <section id="setup" hidden></section>
+  </main>
+</div>
+
+<div id="drop" hidden><div>Отпустите файл, чтобы расшифровать запись</div></div>
+
+<dialog id="redoDialog">
+  <form method="dialog">
+    <h2>Пересоздать протокол</h2>
+    <label>Шаблон <select id="redoTemplate"></select></label>
+    <label>Кто пишет протокол <select id="redoLlm"></select></label>
+    <label class="check"><input type="checkbox" id="redoRetranscribe"> Заново расшифровать аудио (дольше)</label>
+    <label id="redoAsrRow" hidden>Чем распознавать <select id="redoAsr"></select></label>
+    <div class="dlg-actions">
+      <button value="cancel" class="ghost">Отмена</button>
+      <button value="ok" class="primary">Пересоздать</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="deleteDialog">
+  <form method="dialog">
+    <h2>Удалить встречу?</h2>
+    <p id="deleteText"></p>
+    <label class="check"><input type="checkbox" id="deleteAudio" checked> Удалить и аудиозапись</label>
+    <div class="dlg-actions">
+      <button value="cancel" class="ghost">Отмена</button>
+      <button value="ok" class="primary danger-bg">Удалить</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="renameDialog">
+  <form method="dialog">
+    <h2>Кто это?</h2>
+    <p id="renameHint" class="muted"></p>
+    <label>Имя <input id="renameName" type="text" list="voiceNames" autocomplete="off" placeholder="Например, Анна Смирнова"></label>
+    <datalist id="voiceNames"></datalist>
+    <label class="check"><input type="checkbox" id="renameRemember" checked> Запомнить голос</label>
+    <p id="renameRememberHint" class="muted small"></p>
+    <div class="dlg-actions">
+      <button value="reset" class="ghost" id="renameReset">Сбросить имя</button>
+      <span class="spacer"></span>
+      <button value="cancel" class="ghost">Отмена</button>
+      <button value="ok" class="primary">Сохранить</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="sampleDialog" class="wide">
+  <form method="dialog">
+    <h2>Заменить образец голоса</h2>
+    <p class="muted">Выберите фрагмент любой встречи, где говорит <b id="sampleWho"></b>. Сначала показаны встречи, где этот голос уже узнан.</p>
+    <div id="fragmentList" class="fragments"></div>
+    <div class="dlg-actions"><button value="cancel" class="ghost">Закрыть</button></div>
+  </form>
+</dialog>
+
+<dialog id="mergeDialog">
+  <form method="dialog">
+    <h2>Объединить слепки</h2>
+    <p id="mergeText"></p>
+    <label>С каким слепком <select id="mergeInto"></select></label>
+    <div class="dlg-actions">
+      <button value="cancel" class="ghost">Отмена</button>
+      <button value="ok" class="primary">Объединить</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="voiceDeleteDialog">
+  <form method="dialog">
+    <h2>Удалить слепок голоса?</h2>
+    <p id="voiceDeleteText"></p>
+    <div class="dlg-actions">
+      <button value="cancel" class="ghost">Отмена</button>
+      <button value="ok" class="primary danger-bg">Удалить</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="assignDialog">
+  <form method="dialog">
+    <h2>Кто это сказал?</h2>
+    <p id="assignQuote" class="muted small"></p>
+    <div id="assignOptions" class="assign-options"></div>
+    <div class="dlg-actions">
+      <button value="cancel" class="ghost">Отмена</button>
+      <button value="ok" class="primary">Сохранить</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="peopleDialog">
+  <form method="dialog">
+    <h2 id="peopleTitle">Участники встречи</h2>
+    <p id="peopleHint" class="muted small"></p>
+    <label>Имена через запятую, кроме вас
+      <textarea id="peopleNames" rows="3" placeholder="Олег, Даша, Ира Смирнова"></textarea></label>
+    <div id="peopleKnown" class="known"></div>
+    <div class="dlg-actions">
+      <button value="clear" class="ghost">Очистить</button>
+      <span class="spacer"></span>
+      <button value="cancel" class="ghost">Отмена</button>
+      <button value="ok" class="primary">Сохранить</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" role="status" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

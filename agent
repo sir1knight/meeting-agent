@@ -1,0 +1,13 @@
+#!/bin/bash
+# Запуск агента: ./agent web | watch | record | process <файл> | pending | windows | templates
+DIR="$(cd "$(dirname "$0")" && pwd)"
+# Модели уже скачаны при установке — дальше всё работает без интернета.
+export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+export PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}"
+if [[ "${1:-}" == "web" ]]; then
+  # Браузерная версия делит с приложением настройки, ключи, модели и слепки голоса.
+  SUPPORT="$HOME/Library/Application Support/Meeting Agent"
+  export MEETING_AGENT_HOME="${MEETING_AGENT_HOME:-$SUPPORT}"
+  export HF_HOME="${HF_HOME:-$SUPPORT/huggingface}"
+fi
+exec "$DIR/.venv/bin/python" -m meeting_agent "$@"
