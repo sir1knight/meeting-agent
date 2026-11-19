@@ -296,27 +296,22 @@ def check_key(service: str, cfg: dict) -> dict:
 
 
 def _check_gemini(cfg: dict) -> dict:
+    """Без генерации: сведения о выбранной модели (GET models/{модель}) — бесплатно, не тратит лимит
+    и отвечает за секунду. Проверяет и ключ, и то, что модель существует. Пробная генерация на бесплатном
+    уровне иногда ждёт ответа дольше минуты, поэтому её здесь нет."""
     key = config.read_secret("gemini_key")
     if not key:
         return {"ok": False, "message": "Ключ не сохранён"}
-    headers = {"x-goog-api-key": key, "Content-Type": "application/json"}
-    r = _http("GET", f"{GEMINI}/models", headers=headers, params={"pageSize": 1}, timeout=20)
+    model = gemini_model(cfg.get("gemini", {}).get("model"))
+    r = _http("GET", f"{GEMINI}/models/{model}", headers={"x-goog-api-key": key}, timeout=20)
+    if r.status_code == 200:
+        title = r.json().get("displayName") or model
+        return {"ok": True, "message": f"Ключ работает, модель {title} доступна"}
+    if r.status_code == 404:
+        return {"ok": False, "message": f"Ключ работает, но модели {model} нет — выберите другую в списке"}
     if r.status_code in (400, 401, 403):
         return {"ok": False, "message": f"Google не принял ключ: {_api_error(r)[:200]}"}
-    r.raise_for_status()
-    model = gemini_model(cfg.get("gemini", {}).get("model"))
-    r = _http("POST", f"{GEMINI}/models/{model}:generateContent", headers=headers, timeout=60,
-                      json={"contents": [{"role": "user", "parts": [{"text": "Ответь одним словом: готово"}]}],
-                            "generationConfig": {"maxOutputTokens": 32}})
-    if r.status_code == 200:
-        return {"ok": True, "message": f"Ключ работает, модель {model} отвечает"}
-    if r.status_code == 429:
-        return {"ok": False, "message": f"Ключ верный, но для {model} лимит исчерпан или модель недоступна "
-                                        f"без оплаты. Выберите другую модель или попробуйте позже. "
-                                        f"Ответ Google: {_api_error(r)[:150]}"}
-    if r.status_code == 404:
-        return {"ok": False, "message": f"Ключ верный, но модели {model} нет — выберите другую в списке"}
-    return {"ok": False, "message": f"Ключ верный, но запрос к {model} не прошёл: {_api_error(r)[:200]}"}
+    return {"ok": False, "message": f"Google ответил ошибкой {r.status_code}: {_api_error(r)[:200]}"}
 
 
 def _check_openai(cfg: dict) -> dict:
