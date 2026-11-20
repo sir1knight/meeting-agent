@@ -515,73 +515,190 @@ document.querySelectorAll('input[name="exportFmt"]').forEach((r) => r.addEventLi
   $("exportTrRow").hidden = document.querySelector('input[name="exportFmt"]:checked').value === "md";
 }));
 
-// ---------- обновления по компонентам (updates.py) ----------
+// ---------- окно «Обновления»: все компоненты в одном месте ----------
+// Код и интерфейс (GitVerse), пакеты Python (Windows), модели (Hugging Face), ускорение NVIDIA, оболочка.
 
-const UPD = { info: null, checking: false, applying: false, error: "" };
-async function loadUpdateInfo() {
-  try { UPD.info = { ...(UPD.info || {}), ...(await api("update")) }; } catch (_) {}
-  paintUpdates();
+const UPD = { info: null, checking: false, busy: "", error: "", count: 0 };
+
+function updCount() {
+  const u = UPD.info || {}, g = S.gpu, models = (S.status && S.status.models) || {};
+  let n = 0;
+  if (u.code_available) n++;
+  if (u.platform === "windows" && (u.packages_changed || u.packages_pending)) n++;
+  if (IS_WIN && g && g.nvidia && g.outdated) n++;
+  n += Object.values(models).filter((m) => m.required && m.status !== "ready" && m.status !== "downloading").length;
+  return n;
 }
-function paintUpdates() {
-  const c = $("updCard");
-  if (!c) return;
-  c.innerHTML = "<h2>Обновления</h2>" + updatesHtml();
-  c.querySelectorAll("[data-upd]").forEach((b) => b.onclick = () => updAction(b.dataset.upd));
+
+function paintUpdBadge() {
+  UPD.count = updCount();
+  $("updBadge").hidden = !UPD.count;
+  $("updBadge").textContent = UPD.count;
 }
-function updatesHtml() {
-  const u = UPD.info;
-  if (!u) { setTimeout(loadUpdateInfo, 0); return '<div class="hint">…</div>'; }
-  const rows = [];
-  rows.push(`<div class="hint">Версия ${esc(u.version)}${u.overlay ? ` (обновлена; в приложении — ${esc(u.bundled)})` : ""}
-    · оболочка ${u.shell}. Обновления скачиваются с <a href="${esc(u.page)}" target="_blank">GitVerse</a> по компонентам —
-    без переустановки приложения.</div>`);
-  if (UPD.error) rows.push(`<div class="small" style="color:var(--rec)">${esc(UPD.error)}</div>`);
-  if (u.latest !== undefined) {
-    if (u.code_available && !u.shell_needed) {
-      rows.push(`<div class="tpl-row"><span class="grow"><b>Код и интерфейс:</b> ${esc(u.version)} → ${esc(u.latest)}
-        <div class="muted small">${esc(u.notes || "")}</div></span>
-        <button class="primary small" type="button" data-upd="apply"${UPD.applying ? " disabled" : ""}>${UPD.applying ? "Обновляю…" : "Обновить"}</button></div>`);
-    } else if (u.code_available && u.shell_needed) {
-      rows.push(`<div class="hint"><span class="badge warn">нужно приложение целиком</span> Версии ${esc(u.latest)} нужна новая оболочка
-        (${u.platform === "mac" ? "Swift-приложение" : "Meeting Agent.exe и Python"}). Скачайте новую версию со
-        <a href="${esc(u.page)}" target="_blank">страницы проекта</a>.</div>`);
-    } else {
-      rows.push('<div class="hint"><span class="badge ok">актуально</span> Код и интерфейс — последней версии.</div>');
-    }
-    if (u.platform === "windows" && (u.packages_changed || u.packages_pending)) {
-      rows.push(`<div class="tpl-row"><span class="grow"><b>Пакеты Python:</b> ${u.packages_pending ? "новый список готов" : "в новой версии изменились"}
-        <div class="muted small">Ставятся при запуске приложения (окно консоли, несколько минут), пока ничего из них не загружено.</div></span>
-        ${u.packages_pending ? '<button class="ghost small" type="button" data-upd="restart">Перезапустить и обновить</button>' : ""}</div>`);
-    }
+
+// При запуске — тихая проверка (GitVerse не чаще раза в сутки).
+async function autoCheckUpdates() {
+  try { UPD.info = await api("update/check", { method: "POST", body: { cached: true } }); }
+  catch (_) { try { UPD.info = await api("update"); } catch (_) {} }
+  if (IS_WIN && S.gpu === undefined) { S.gpu = null; await loadGpu(); }
+  paintUpdBadge();
+}
+
+function updRow(title, state, body, action = "") {
+  return `<div class="upd-row"><div class="grow"><div class="r-title">${title} ${state}</div>${body ? `<div class="muted small">${body}</div>` : ""}</div>${action}</div>`;
+}
+
+function updWindowHtml() {
+  const u = UPD.info || {}, st = S.status || {}, models = st.models || {};
+  const known = u.latest !== undefined;
+  const out = [];
+  out.push(`<p class="muted small">Обновления скачиваются по компонентам — без переустановки приложения.
+    Код — с <a href="${esc(u.page || "https://gitverse.ru/sir1knight/Meeting_agent")}" target="_blank">GitVerse</a>, модели — с Hugging Face${IS_WIN ? ", пакеты — с PyPI" : ""}.
+    ${u.checked ? "" : ""}</p>`);
+  if (UPD.error) out.push(`<div class="stale">${esc(UPD.error)}</div>`);
+
+  // 1. Код и интерфейс
+  let code;
+  if (!known) code = updRow("Код и интерфейс", `<span class="muted small">версия ${esc(u.version || "…")}</span>`, "Нажмите «Проверить обновления».");
+  else if (u.code_available && u.shell_needed) code = updRow("Код и интерфейс", '<span class="badge warn">нужно приложение целиком</span>',
+    `Версии ${esc(u.latest)} нужна новая оболочка — скачайте приложение целиком со <a href="${esc(u.page)}" target="_blank">страницы проекта</a>.`);
+  else if (u.code_available) code = updRow("Код и интерфейс", `<span class="badge warn">${esc(u.version)} → ${esc(u.latest)}</span>`,
+    esc(u.notes || ""), `<button class="primary small" type="button" data-upd="code"${UPD.busy ? " disabled" : ""}>${UPD.busy === "code" ? "Обновляю…" : "Обновить"}</button>`);
+  else code = updRow("Код и интерфейс", `<span class="badge ok">${esc(u.version)} — последняя</span>`, "");
+  out.push(code);
+
+  // 2. Пакеты Python (Windows)
+  if (u.platform === "windows") {
+    const need = u.packages_changed || u.packages_pending;
+    out.push(updRow("Пакеты Python", need ? '<span class="badge warn">есть новые</span>' : '<span class="badge ok">актуальны</span>',
+      need ? (u.packages_pending ? "Поставятся при перезапуске приложения (окно консоли, несколько минут)." : "Сначала обновите код — новый список пакетов придёт вместе с ним.") : "",
+      u.packages_pending ? '<button class="ghost small" type="button" data-upd="restart">Перезапустить и обновить</button>' : ""));
   }
-  rows.push(`<div class="row"><button class="ghost small" type="button" data-upd="check"${UPD.checking ? " disabled" : ""}>
-    ${UPD.checking ? '<span class="spinner"></span> Проверяю…' : "Проверить обновления"}</button>
-    ${u.overlay ? '<button class="link small" type="button" data-upd="reset">Вернуться к версии из приложения</button>' : ""}</div>
-    <div class="muted small">Модели обновляются отдельно — в карточке «Модели».</div>`);
-  return rows.join("");
+
+  // 3. Модели
+  const mrows = Object.entries(models).filter(([, m]) => m.required || m.status === "ready").map(([name, m]) => {
+    const state = m.status === "ready" ? '<span class="badge ok">скачана</span>'
+      : m.status === "downloading" ? '<span class="badge warn">скачивается</span>' : '<span class="badge warn">не скачана</span>';
+    return updRow(esc(m.title), state, "", m.status === "ready" ? "" : `<div class="upd-dl">${downloadWidget(name, m)}</div>`);
+  });
+  out.push(`<h3>Модели</h3>${mrows.join("") || '<p class="muted small">Нет моделей.</p>'}`);
+
+  // 4. Ускорение NVIDIA (Windows с видеокартой NVIDIA)
+  if (IS_WIN && S.gpu && S.gpu.nvidia) {
+    const g = S.gpu;
+    const action = g.state === "downloading" ? '<span class="spinner"></span>'
+      : g.state === "ready" && !g.outdated ? ""
+      : `<button class="ghost small" type="button" data-gpu-upd="install">${g.state === "ready" ? "Обновить" : "Скачать"} ≈ ${fmtBytes(g.size)}</button>`;
+    const state = g.state === "ready" ? (g.outdated ? `<span class="badge warn">${esc(g.installed_tag || "старая")} → ${esc(g.latest_tag)}</span>` : '<span class="badge ok">установлено</span>')
+      : g.state === "downloading" ? `<span class="badge warn">${esc(g.part)}: ${Math.round(100 * g.done / (g.total || 1))}%</span>`
+      : '<span class="muted small">не установлено</span>';
+    out.push(`<h3>Ускорение NVIDIA</h3>` + updRow(esc(g.nvidia.name), state,
+      g.state === "error" ? esc(g.error) : "Библиотеки CUDA для Whisper и Qwen на видеокарте.", action));
+  }
+
+  // 5. Оболочка
+  out.push("<h3>Приложение</h3>" + updRow(u.platform === "mac" ? "Оболочка (Swift)" : "Оболочка (Meeting Agent.exe и Python)",
+    known && u.shell_needed ? '<span class="badge warn">нужна новая</span>' : `<span class="badge ok">версия ${esc(u.shell || "?")}</span>`,
+    "Обновляется только новой версией приложения целиком — если она понадобится, здесь появится ссылка.", ""));
+
+  const n = updCount();
+  out.push(`<div class="dlg-actions upd-actions">
+    ${u.overlay ? '<button class="link small" type="button" data-upd="reset">Вернуться к версии из приложения</button>' : ""}
+    <button class="ghost" type="button" data-upd="check"${UPD.checking ? " disabled" : ""}>${UPD.checking ? '<span class="spinner"></span> Проверяю…' : "Проверить обновления"}</button>
+    <button class="primary" type="button" data-upd="all"${!n || UPD.busy ? " disabled" : ""}>${UPD.busy === "all" ? "Обновляю…" : n ? `Обновить всё (${n})` : "Всё актуально"}</button>
+    <button class="ghost" type="button" data-upd="close">Закрыть</button></div>`);
+  return out.join("");
 }
+
+function paintUpdWindow() {
+  paintUpdBadge();
+  if (!$("updDialog").open) return;
+  $("updBody").innerHTML = updWindowHtml();
+  $("updBody").querySelectorAll("[data-upd]").forEach((b) => b.onclick = () => updAction(b.dataset.upd));
+  $("updBody").querySelectorAll("[data-gpu-upd]").forEach((b) => b.onclick = async () => {
+    b.disabled = true;
+    try { await api("gpu/install", { method: "POST", body: {} }); } catch (e) { toast(e.message, 6000); }
+    await loadGpu(); watchGpu();
+  });
+}
+
+async function openUpdates() {
+  $("updDialog").showModal();
+  paintUpdWindow();
+  if (!UPD.info) await autoCheckUpdates();
+  paintUpdWindow();
+}
+
+let gpuWatch = null;
+function watchGpu() {
+  clearTimeout(gpuWatch);
+  if (S.gpu && S.gpu.state === "downloading") gpuWatch = setTimeout(async () => { await loadGpu(); paintUpdWindow(); watchGpu(); }, 1500);
+}
+
 async function updAction(act) {
   UPD.error = "";
+  if (act === "close") { $("updDialog").close(); return; }
   if (act === "check") {
-    UPD.checking = true; paintUpdates();
+    UPD.checking = true; paintUpdWindow();
     try { UPD.info = await api("update/check", { method: "POST", body: {} }); }
     catch (e) { UPD.error = e.message; }
-    UPD.checking = false; paintUpdates();
-  } else if (act === "apply" || act === "reset") {
+    if (IS_WIN) await loadGpu();
+    UPD.checking = false; paintUpdWindow();
+  } else if (act === "code" || act === "reset") {
     if (act === "reset" && !confirm("Вернуться к версии, встроенной в приложение? Скачанное обновление удалится.")) return;
-    UPD.applying = true; paintUpdates();
-    try {
-      const r = await api(act === "apply" ? "update/apply" : "update/reset", { method: "POST", body: {} });
-      toast(act === "apply" ? `Обновлено до ${r.version}. Перезапускаю…` : "Возвращаюсь к встроенной версии…", 5000);
-      if (r.packages_pending) toast("Пакеты Python обновятся при следующем запуске приложения", 8000);
-      setTimeout(waitServerAndReload, 3000);
-    } catch (e) {
-      UPD.error = e.message; UPD.applying = false; paintUpdates();
-    }
+    await applyCode(act);
   } else if (act === "restart") {
     native("restartApp");
+  } else if (act === "all") {
+    await updateAll();
   }
 }
+
+async function applyCode(act = "code") {
+  UPD.busy = "code"; paintUpdWindow();
+  try {
+    const r = await api(act === "reset" ? "update/reset" : "update/apply", { method: "POST", body: {} });
+    toast(act === "reset" ? "Возвращаюсь к встроенной версии…" : `Обновлено до ${r.version}. Перезапускаю…`, 5000);
+    if (r.packages_pending) toast("Пакеты Python обновятся при следующем запуске приложения", 8000);
+    setTimeout(waitServerAndReload, 3000);
+  } catch (e) {
+    UPD.error = e.message; UPD.busy = ""; paintUpdWindow();
+  }
+}
+
+// «Обновить всё»: сначала то, что качается в фоне (модели, NVIDIA), потом код — он перезапускает сервер.
+async function updateAll() {
+  UPD.busy = "all"; paintUpdWindow();
+  try {
+    const models = (S.status && S.status.models) || {};
+    for (const [name, m] of Object.entries(models)) {
+      if (m.required && m.status !== "ready" && m.status !== "downloading") {
+        await api("models/download", { method: "POST", body: { name } }).catch((e) => toast(e.message));
+      }
+    }
+    if (IS_WIN && S.gpu && S.gpu.nvidia && S.gpu.outdated) {
+      await api("gpu/install", { method: "POST", body: {} }).catch((e) => toast(e.message));
+    }
+    for (let i = 0; i < 7200; i++) {  // ждём фоновые загрузки (до 2 часов)
+      await pollStatus();
+      if (IS_WIN) await loadGpu();
+      paintUpdWindow();
+      const ms = Object.values((S.status && S.status.models) || {});
+      if (!ms.some((m) => m.status === "downloading") && !(S.gpu && S.gpu.state === "downloading")) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    const u = UPD.info || {};
+    if (u.code_available && !u.shell_needed) { await applyCode(); return; }
+    if (u.platform === "windows" && u.packages_pending) {
+      if (confirm("Пакеты Python обновятся при перезапуске. Перезапустить сейчас?")) native("restartApp");
+    }
+    toast("Готово", 3000);
+  } finally {
+    if (UPD.busy === "all") UPD.busy = "";
+    paintUpdWindow();
+  }
+}
+
 async function waitServerAndReload() {
   for (let i = 0; i < 60; i++) {
     try { await api("status"); location.reload(); return; } catch (_) {}
@@ -589,6 +706,8 @@ async function waitServerAndReload() {
   }
   toast("Сервер не поднялся — перезапустите приложение", 8000);
 }
+
+$("updatesBtn").addEventListener("click", openUpdates);
 
 // ---------- свои шаблоны протоколов ----------
 
@@ -1671,6 +1790,9 @@ function gpuHtml(g) {
     const pct = g.total ? Math.min(100, (100 * g.done) / g.total) : 0;
     html += `<div class="dl"><div class="bar"><div style="width:${pct}%"></div></div>
       <div class="dl-row"><span class="muted small">${esc(g.part)}: ${fmtBytes(g.done)} из ≈ ${fmtBytes(g.total)}</span><span class="spinner"></span></div></div>`;
+  } else if (g.state === "ready" && g.outdated) {
+    html += `<div class="row"><span class="badge warn">Есть новая сборка (${esc(g.latest_tag)})</span>
+      <button class="ghost small" type="button" data-gpu="install">Обновить</button></div>`;
   } else if (g.state === "ready") {
     html += `<div class="row"><span class="badge ok">Включено</span>
       <span class="muted small">Whisper${g.llm_on_gpu ? " и Qwen" : ""} — на видеокарте</span>
@@ -1785,17 +1907,17 @@ function renderSettings() {
       <div class="hint">Заметки: ${esc(s.notes_dir)} · <button class="link" id="sReveal">Открыть папку</button></div>
     </div>
 
-    <div class="card" id="updCard"><h2>Обновления</h2>${updatesHtml()}</div>
-
-    <div class="card"><h2>Модели</h2>${modelsHtml(st ? st.models : {})}</div>
-    ${IS_WIN ? gpuCardHtml("Ускорение NVIDIA") : ""}
+    <div class="card"><h2>Обновления и компоненты</h2>
+      <div class="hint">Код и интерфейс, ${IS_WIN ? "пакеты Python, " : ""}модели${IS_WIN ? ", ускорение NVIDIA" : ""} — в одном окне:
+        что установлено, что обновить, и кнопка «Обновить всё».</div>
+      <button class="ghost" type="button" id="sUpdates">Открыть «Обновления»${UPD.count ? ` (${UPD.count})` : ""}</button></div>
 
     <div class="card"><h2>Запись встреч и закон</h2>
       <div class="hint">Приложение не уведомляет участников о записи. Предупреждайте их и сверяйтесь с правилами компании.</div></div>
   </div>`;
 
   bindBackendRadios($("settings"));
-  loadGpu();
+  $("sUpdates").onclick = openUpdates;
   const save = async (body, msg = "Сохранено") => {
     try {
       S.settings = await api("settings", { method: "POST", body });
@@ -1922,6 +2044,7 @@ async function pollStatus() {
   clearTimeout(pollTimer);
   try {
     S.status = await api("status");
+    if ($("updDialog").open) paintUpdWindow(); else paintUpdBadge();
     renderRecording();
     renderJobs();
     if (S.status.setup_needed && !S.setupDismissed && S.view !== "settings") {
@@ -1973,4 +2096,5 @@ window.agentEvent = (name) => {
   show("meeting");
   if (S.meetings.length) openMeeting(S.meetings[0].id);
   pollStatus();
+  setTimeout(autoCheckUpdates, 4000);  // тихая проверка обновлений (GitVerse — не чаще раза в сутки)
 })();

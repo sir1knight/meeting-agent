@@ -816,7 +816,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_post_update_check(self, q):
         from . import updates
-        self._json(updates.check())
+        self._json(updates.check(24 if self._data().get("cached") else 0))
 
     def api_post_update_apply(self, q):
         from . import updates

@@ -99,17 +99,18 @@ def packages_needed(root: Path | None = None) -> bool:
 
 # ---------- запросы к GitVerse ----------
 
-def _get(url: str, **kw):
-    """GitVerse ограничивает частоту анонимных запросов (ответ 429) — ждём и повторяем."""
+def _get(url: str, quick: bool = False, **kw):
+    """GitVerse ограничивает частоту анонимных запросов (ответ 429) — ждём и повторяем
+    (quick — одна попытка: для тихой проверки при запуске)."""
     import requests
 
     last = None
-    for wait in (0, 15, 30, 45):
+    for wait in ((0,) if quick else (0, 15, 30, 45)):
         if wait:
             log.info("GitVerse просит подождать, повтор через %d с…", wait)
             time.sleep(wait)
         try:
-            r = requests.get(url, timeout=60, **kw)
+            r = requests.get(url, timeout=20 if quick else 60, **kw)
         except requests.RequestException as e:
             last = e
             continue
@@ -125,10 +126,19 @@ def _get(url: str, **kw):
     raise RuntimeError(f"GitVerse ответил ошибкой {last}")
 
 
-def remote_manifest() -> dict:
-    r = _get(f"{API}/contents/version.json", params={"ref": BRANCH})
-    data = r.json()
-    return json.loads(base64.b64decode(data["content"]).decode("utf-8"))
+def remote_manifest(max_age_hours: float = 0) -> dict:
+    """version.json с GitVerse. max_age_hours > 0 — можно взять сохранённый ответ не старше этого
+    (автопроверка при запуске не дёргает GitVerse чаще раза в сутки)."""
+    cache = config.HOME / "update-check.json"
+    if max_age_hours and cache.exists() and time.time() - cache.stat().st_mtime < max_age_hours * 3600:
+        try:
+            return json.loads(cache.read_text(encoding="utf-8"))
+        except ValueError:
+            pass
+    r = _get(f"{API}/contents/version.json", quick=bool(max_age_hours), params={"ref": BRANCH})
+    m = json.loads(base64.b64decode(r.json()["content"]).decode("utf-8"))
+    cache.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+    return m
 
 
 # ---------- что можно обновить ----------
@@ -143,9 +153,9 @@ def status() -> dict:
             "packages_pending": packages_needed(), "page": PAGE}
 
 
-def check() -> dict:
+def check(max_age_hours: float = 0) -> dict:
     st = status()
-    m = remote_manifest()
+    m = remote_manifest(max_age_hours)
     latest = m.get("app", "0")
     need_shell = (m.get("shell") or {}).get(platform(), 1)
     st.update(latest=latest, notes=m.get("notes", ""),

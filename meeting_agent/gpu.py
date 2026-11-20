@@ -33,6 +33,7 @@ PARTS = [
 ]
 GPU_DIR = config.HOME / "gpu"
 READY = GPU_DIR / ".ready"  # имя текущей папки с библиотеками (bin-<время установки>)
+TAG_FILE = GPU_DIR / "llama-tag.txt"  # какая сборка llama.cpp стоит (новая версия кода может требовать новее)
 SERVER_EXE = "meeting-agent-llm.exe"  # переименованный llama-server.exe: свой процесс легко найти и закрыть
 MIN_LLM_VRAM_MB = 7000  # Qwen 7B (4,7 ГБ) + контекст 16 тыс. токенов (~1 ГБ) с запасом
 
@@ -92,6 +93,12 @@ def status() -> dict:
         st = dict(_state)
     if st["state"] == "idle" and ready():
         st["state"] = "ready"
+    try:
+        installed = TAG_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        installed = ""
+    st.update(installed_tag=installed, latest_tag=LLAMA_TAG,
+              outdated=st["state"] == "ready" and installed != LLAMA_TAG)
     st.update(available=osutil.IS_WIN, nvidia=info, llm_on_gpu=llm_on_gpu(),
               min_llm_vram_mb=MIN_LLM_VRAM_MB, size=sum(p[2] for p in PARTS))
     return st
@@ -160,6 +167,7 @@ def _install() -> None:
         server.rename(new_bin / SERVER_EXE)
         shutil.rmtree(tmp, ignore_errors=True)
         READY.write_text(new_bin.name, encoding="utf-8")
+        TAG_FILE.write_text(LLAMA_TAG, encoding="utf-8")
         activate()
         log.info("Ускорение NVIDIA установлено (%s, llama.cpp %s)", new_bin, LLAMA_TAG)
         with _lock:

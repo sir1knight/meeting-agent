@@ -340,3 +340,11 @@ dialog .check { font-weight: 400; }
 .mchat .q { margin: 18px 0 8px auto; max-width: 80%; width: fit-content; background: var(--active); padding: 8px 12px; border-radius: 12px; }
 .mchat .a { background: var(--card); border: 1px solid var(--line); padding: 10px 14px; border-radius: 12px; }
 .mchat .a.err { color: var(--rec); }
+.upd-row { display: flex; gap: 12px; align-items: flex-start; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.upd-row .grow { flex: 1; min-width: 0; }
+.upd-row .upd-dl { min-width: 220px; }
+#updDialog h3 { margin: 16px 0 2px; font-size: 14px; }
+#updBody { max-height: 70vh; overflow-y: auto; }
+.upd-actions { flex-wrap: wrap; position: sticky; bottom: 0; background: var(--card, var(--bg)); padding-top: 10px; }
+.upd-badge { display: inline-block; min-width: 16px; padding: 0 5px; border-radius: 8px; background: var(--rec); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 16px; text-align: center; margin-left: 2px; }

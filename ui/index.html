@@ -29,6 +29,7 @@
       <button id="importBtn" class="ghost" title="Импортировать аудиофайл">＋ Импорт</button>
       <button id="voicesBtn" class="ghost" title="Слепки голоса собеседников">Голоса</button>
       <button id="settingsBtn" class="ghost">Настройки</button>
+      <button id="updatesBtn" class="ghost" title="Обновления и компоненты">Обновления <span id="updBadge" class="upd-badge" hidden></span></button>
       <input id="fileInput" type="file" accept="audio/*,video/mp4,video/quicktime,.m4a,.mp3,.wav,.ogg,.opus,.webm,.flac" hidden>
     </div>
   </aside>
@@ -98,6 +99,11 @@
       <button value="ok" class="primary">Пересоздать</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="updDialog" class="wide">
+  <h2>Обновления</h2>
+  <div id="updBody"></div>
 </dialog>
 
 <dialog id="exportDialog">
