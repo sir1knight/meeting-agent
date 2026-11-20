@@ -516,7 +516,7 @@ document.querySelectorAll('input[name="exportFmt"]').forEach((r) => r.addEventLi
 }));
 
 // ---------- окно «Обновления»: все компоненты в одном месте ----------
-// Код и интерфейс (GitVerse), пакеты Python (Windows), модели (Hugging Face), ускорение NVIDIA, оболочка.
+// Код и интерфейс (GitVerse или GitLab), пакеты Python (Windows), модели (Hugging Face), ускорение NVIDIA, оболочка.
 
 const UPD = { info: null, checking: false, busy: "", error: "", count: 0 };
 
@@ -541,7 +541,7 @@ function paintUpdBadge() {
   $("updBadge").textContent = UPD.count;
 }
 
-// При запуске — тихая проверка (GitVerse не чаще раза в сутки).
+// При запуске — тихая проверка (площадки — не чаще раза в сутки).
 async function autoCheckUpdates() {
   try { UPD.info = await api("update/check", { method: "POST", body: { cached: true } }); }
   catch (_) { try { UPD.info = await api("update"); } catch (_) {} }
@@ -558,8 +558,9 @@ function updWindowHtml() {
   const known = u.latest !== undefined;
   const out = [];
   out.push(`<p class="muted small">Обновления скачиваются по компонентам — без переустановки приложения.
-    Код — с <a href="${esc(u.page || "https://gitverse.ru/sir1knight/Meeting_agent")}" target="_blank">GitVerse</a>, модели — с Hugging Face${IS_WIN ? ", пакеты — с PyPI" : ""}.
-    ${u.checked ? "" : ""}</p>`);
+    Код — с <a href="https://gitverse.ru/sir1knight/Meeting_agent" target="_blank">GitVerse</a> или
+    <a href="https://gitlab.com/sir1knight/Meeting_agent" target="_blank">GitLab</a> — откуда доступнее${u.source ? ` (сейчас — ${esc(u.source)})` : ""},
+    модели — с Hugging Face${IS_WIN ? ", пакеты — с PyPI" : ""}.</p>`);
   if (UPD.error) out.push(`<div class="stale">${esc(UPD.error)}</div>`);
 
   // 1. Код и интерфейс
@@ -622,7 +623,7 @@ function updWindowHtml() {
   return out.join("");
 }
 
-// «Что нового» версии с GitVerse (раздел CHANGELOG.md, перенесённый в version.json).
+// «Что нового» версии с GitVerse/GitLab (раздел CHANGELOG.md, перенесённый в version.json).
 function changesHtml(u) {
   const groups = Object.entries(u.changes || {});
   if (!groups.length) return esc(u.notes || "");
@@ -2139,5 +2140,5 @@ window.agentEvent = (name) => {
   show("meeting");
   if (S.meetings.length) openMeeting(S.meetings[0].id);
   pollStatus();
-  setTimeout(autoCheckUpdates, 4000);  // тихая проверка обновлений (GitVerse — не чаще раза в сутки)
+  setTimeout(autoCheckUpdates, 4000);  // тихая проверка обновлений (GitVerse/GitLab — не чаще раза в сутки)
 })();
