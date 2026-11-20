@@ -809,6 +809,32 @@ class Handler(BaseHTTPRequestHandler):
         data = self._data()
         self._json(check_key(str(data.get("service", "")), config.load(), bool(data.get("full"))))
 
+    # --- обновления по компонентам (updates.py) ---
+    def api_get_update(self, q):
+        from . import updates
+        self._json(updates.status())
+
+    def api_post_update_check(self, q):
+        from . import updates
+        self._json(updates.check())
+
+    def api_post_update_apply(self, q):
+        from . import updates
+        if any(j["status"] == "running" for j in self.state.jobs.snapshot()):
+            raise ValueError("Дождитесь, пока закончится обработка встречи")
+        if self.state.recording.get("state") == "recording" and osutil.IS_WIN:
+            raise ValueError("Дождитесь конца записи")
+        r = updates.apply_code()
+        self._json(r)
+        # Перезапуск сервера: оболочка (Swift / Meeting Agent.exe) сама поднимет его — уже с новым кодом.
+        threading.Timer(1.5, lambda: os._exit(0)).start()
+
+    def api_post_update_reset(self, q):
+        from . import updates
+        updates.reset_code()
+        self._json({"ok": True})
+        threading.Timer(1.5, lambda: os._exit(0)).start()
+
     def api_get_gemini_models(self, q):
         from .summarize import gemini_models
 

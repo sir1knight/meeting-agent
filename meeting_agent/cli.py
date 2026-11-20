@@ -6,10 +6,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from . import config, pipeline
+from . import config
 
 
-def main() -> None:
+def main() -> None:  # pipeline импортируется по месту: bootstrap и winapp — на голом Python
     p = argparse.ArgumentParser(prog="agent", description="Локальный агент саммари встреч")
     p.add_argument("--config", help="путь к config.toml")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -38,6 +38,7 @@ def main() -> None:
     lv = sub.add_parser("live", help="распознавать запись, пока она идёт (запускает приложение)")
     lv.add_argument("folder")
 
+    sub.add_parser("bootstrap", help="Windows: установить или обновить пакеты Python (окно консоли)")
     sub.add_parser("winapp", help="приложение для Windows: трей, окно, запись (запускает Meeting Agent.exe)")
 
     sv = sub.add_parser("serve", help="локальный сервер окна приложения")
@@ -58,6 +59,9 @@ def main() -> None:
         cfg["llm"]["backend"] = args.llm
     if getattr(args, "asr", None):
         cfg["whisper"]["engine"] = args.asr
+
+    if args.cmd in ("record", "process", "pending"):
+        from . import pipeline  # тянет requests и numpy — только там, где нужно
 
     if args.cmd == "watch":
         from .watcher import watch
@@ -98,6 +102,10 @@ def main() -> None:
     elif args.cmd == "live":
         from .live import run
         run(Path(args.folder), cfg)
+
+    elif args.cmd == "bootstrap":
+        from .bootstrap import run as bootstrap_run
+        sys.exit(bootstrap_run())
 
     elif args.cmd == "winapp":
         from .winapp import main as winapp_main

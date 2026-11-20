@@ -515,6 +515,81 @@ document.querySelectorAll('input[name="exportFmt"]').forEach((r) => r.addEventLi
   $("exportTrRow").hidden = document.querySelector('input[name="exportFmt"]:checked').value === "md";
 }));
 
+// ---------- обновления по компонентам (updates.py) ----------
+
+const UPD = { info: null, checking: false, applying: false, error: "" };
+async function loadUpdateInfo() {
+  try { UPD.info = { ...(UPD.info || {}), ...(await api("update")) }; } catch (_) {}
+  paintUpdates();
+}
+function paintUpdates() {
+  const c = $("updCard");
+  if (!c) return;
+  c.innerHTML = "<h2>Обновления</h2>" + updatesHtml();
+  c.querySelectorAll("[data-upd]").forEach((b) => b.onclick = () => updAction(b.dataset.upd));
+}
+function updatesHtml() {
+  const u = UPD.info;
+  if (!u) { setTimeout(loadUpdateInfo, 0); return '<div class="hint">…</div>'; }
+  const rows = [];
+  rows.push(`<div class="hint">Версия ${esc(u.version)}${u.overlay ? ` (обновлена; в приложении — ${esc(u.bundled)})` : ""}
+    · оболочка ${u.shell}. Обновления скачиваются с <a href="${esc(u.page)}" target="_blank">GitVerse</a> по компонентам —
+    без переустановки приложения.</div>`);
+  if (UPD.error) rows.push(`<div class="small" style="color:var(--rec)">${esc(UPD.error)}</div>`);
+  if (u.latest !== undefined) {
+    if (u.code_available && !u.shell_needed) {
+      rows.push(`<div class="tpl-row"><span class="grow"><b>Код и интерфейс:</b> ${esc(u.version)} → ${esc(u.latest)}
+        <div class="muted small">${esc(u.notes || "")}</div></span>
+        <button class="primary small" type="button" data-upd="apply"${UPD.applying ? " disabled" : ""}>${UPD.applying ? "Обновляю…" : "Обновить"}</button></div>`);
+    } else if (u.code_available && u.shell_needed) {
+      rows.push(`<div class="hint"><span class="badge warn">нужно приложение целиком</span> Версии ${esc(u.latest)} нужна новая оболочка
+        (${u.platform === "mac" ? "Swift-приложение" : "Meeting Agent.exe и Python"}). Скачайте новую версию со
+        <a href="${esc(u.page)}" target="_blank">страницы проекта</a>.</div>`);
+    } else {
+      rows.push('<div class="hint"><span class="badge ok">актуально</span> Код и интерфейс — последней версии.</div>');
+    }
+    if (u.platform === "windows" && (u.packages_changed || u.packages_pending)) {
+      rows.push(`<div class="tpl-row"><span class="grow"><b>Пакеты Python:</b> ${u.packages_pending ? "новый список готов" : "в новой версии изменились"}
+        <div class="muted small">Ставятся при запуске приложения (окно консоли, несколько минут), пока ничего из них не загружено.</div></span>
+        ${u.packages_pending ? '<button class="ghost small" type="button" data-upd="restart">Перезапустить и обновить</button>' : ""}</div>`);
+    }
+  }
+  rows.push(`<div class="row"><button class="ghost small" type="button" data-upd="check"${UPD.checking ? " disabled" : ""}>
+    ${UPD.checking ? '<span class="spinner"></span> Проверяю…' : "Проверить обновления"}</button>
+    ${u.overlay ? '<button class="link small" type="button" data-upd="reset">Вернуться к версии из приложения</button>' : ""}</div>
+    <div class="muted small">Модели обновляются отдельно — в карточке «Модели».</div>`);
+  return rows.join("");
+}
+async function updAction(act) {
+  UPD.error = "";
+  if (act === "check") {
+    UPD.checking = true; paintUpdates();
+    try { UPD.info = await api("update/check", { method: "POST", body: {} }); }
+    catch (e) { UPD.error = e.message; }
+    UPD.checking = false; paintUpdates();
+  } else if (act === "apply" || act === "reset") {
+    if (act === "reset" && !confirm("Вернуться к версии, встроенной в приложение? Скачанное обновление удалится.")) return;
+    UPD.applying = true; paintUpdates();
+    try {
+      const r = await api(act === "apply" ? "update/apply" : "update/reset", { method: "POST", body: {} });
+      toast(act === "apply" ? `Обновлено до ${r.version}. Перезапускаю…` : "Возвращаюсь к встроенной версии…", 5000);
+      if (r.packages_pending) toast("Пакеты Python обновятся при следующем запуске приложения", 8000);
+      setTimeout(waitServerAndReload, 3000);
+    } catch (e) {
+      UPD.error = e.message; UPD.applying = false; paintUpdates();
+    }
+  } else if (act === "restart") {
+    native("restartApp");
+  }
+}
+async function waitServerAndReload() {
+  for (let i = 0; i < 60; i++) {
+    try { await api("status"); location.reload(); return; } catch (_) {}
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  toast("Сервер не поднялся — перезапустите приложение", 8000);
+}
+
 // ---------- свои шаблоны протоколов ----------
 
 let tplEditing = null;  // id своего шаблона, который меняем (null — новый)
@@ -1709,6 +1784,8 @@ function renderSettings() {
       <label class="check"><input type="checkbox" id="sKeepAudio"${s.keep_audio ? " checked" : ""}> Хранить аудио после обработки (нужно, чтобы позже заново расшифровать)</label>
       <div class="hint">Заметки: ${esc(s.notes_dir)} · <button class="link" id="sReveal">Открыть папку</button></div>
     </div>
+
+    <div class="card" id="updCard"><h2>Обновления</h2>${updatesHtml()}</div>
 
     <div class="card"><h2>Модели</h2>${modelsHtml(st ? st.models : {})}</div>
     ${IS_WIN ? gpuCardHtml("Ускорение NVIDIA") : ""}

@@ -61,7 +61,10 @@ say "Собираю приложение"
 rm -rf "${APP}"
 mkdir -p "${APP}/Contents/MacOS" "${RES}/app"
 cp -cR "${ENV}" "${RES}/python"
-cp -R meeting_agent templates ui config.toml "${RES}/app/"
+cp -R meeting_agent templates ui config.toml version.json "${RES}/app/"
+# Версия оболочки (Swift): код, скачанный кнопкой «Обновить», проверяет, что она подходит (version.json → shell.mac).
+SHELL_VERSION=$(python3 -c "import json; print(json.load(open('version.json'))['shell']['mac'])")
+printf '{"shell": %s}\n' "${SHELL_VERSION}" > "${RES}/shell.json"
 find "${RES}/app" -name "__pycache__" -type d -prune -exec rm -rf {} +
 
 say "Компилирую оболочку (Swift)"

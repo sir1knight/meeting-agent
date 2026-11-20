@@ -446,11 +446,19 @@ class App:
             threading.Thread(target=self.recording.stop_by_user, args=("остановлено в окне",), daemon=True).start()
         elif cmd == "reloadSettings":
             threading.Thread(target=self.recording.reload_settings, daemon=True).start()
+        elif cmd == "restartApp":
+            threading.Thread(target=self._restart, daemon=True).start()
         elif cmd == "openURL" and str(msg.get("url", "")).startswith(("https://", "http://")):
             import webbrowser
 
             webbrowser.open(msg["url"])
         return True
+
+    def _restart(self) -> None:
+        # Новый экземпляр ждёт, пока старый закроется (мьютекс), поэтому сначала выходим, потом запускаемся.
+        subprocess.Popen(["cmd", "/c", "ping", "-n", "4", "127.0.0.1", ">nul", "&", "start", "", EXE],
+                         creationflags=osutil.CREATE_NO_WINDOW)
+        self.quit()
 
     def event(self, name: str) -> None:
         if self.window:
@@ -622,6 +630,23 @@ class Bridge:
         return self._app.command(msg)
 
 
+def _ensure_packages() -> bool:
+    """Нет пакетов Python (маленький установщик) или поменялся их список (обновление) — ставим их в окне
+    консоли и ждём. False — не получилось, приложение не запускаем."""
+    from .updates import packages_needed
+
+    if not packages_needed():
+        return True
+    log.info("Устанавливаю пакеты Python…")
+    python = Path(sys.executable).with_name("python.exe")
+    r = subprocess.run([str(python), "-m", "meeting_agent", "bootstrap"], cwd=str(APP_ROOT),
+                       creationflags=subprocess.CREATE_NEW_CONSOLE)
+    if r.returncode != 0 or packages_needed():
+        _message("Компоненты не установлены. Проверьте интернет и запустите Meeting Agent снова.")
+        return False
+    return True
+
+
 def _already_running() -> bool:
     """Второй запуск: показываем окно уже работающей копии и выходим."""
     ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\MeetingAgentApp")
@@ -652,6 +677,13 @@ def main() -> None:
         _unblock_downloaded()
     except Exception as e:
         log.warning("Не снял пометку «из интернета»: %s", e)
+    try:
+        if not _ensure_packages():
+            return
+    except Exception as e:
+        log.exception("Установка пакетов не удалась")
+        _message(f"Не удалось установить компоненты: {e}\n\nЖурнал: {HOME / 'logs' / 'app.log'}")
+        return
     try:
         App().run()
     except Exception as e:
