@@ -41,6 +41,12 @@ CHUNK_PROMPT = """Это фрагмент {i} из {n} расшифровки в
 {text}"""
 
 
+TIMES_RULE = ("\n\nВремя: в разделах про обсуждение, решения и задачи в конце каждого пункта ставь время из "
+              "расшифровки, когда это прозвучало, — в квадратных скобках, например [00:12:40]; в таблице задач — "
+              "в конце текста задачи. В кратком итоге в начале время не ставь. Время бери только из расшифровки "
+              "или тезисов, не придумывай.")
+
+
 def template_text(name: str) -> str:
     from . import templates
 
@@ -552,7 +558,7 @@ def summarize(transcript: str, cfg: dict, template: str) -> tuple[str, str]:
         source = (f"Название встречи в календаре: «{cal['title']}». Используй его как подсказку "
                   "о теме, но заголовок пиши по содержанию разговора.\n\n" + source)
     log.info("Итоговое саммари…")
-    return parse_title(chat(cfg, f"{instructions}\n\n{source}"))
+    return parse_title(chat(cfg, f"{instructions}{TIMES_RULE}\n\n{source}"))
 
 
 def parse_title(text: str) -> tuple[str, str]:

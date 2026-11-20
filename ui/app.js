@@ -153,11 +153,49 @@ function fmtTs(sec) {
   return [h, m, s].map((x) => String(x).padStart(2, "0")).join(":");
 }
 
-function segmentsHtml(segs, playable = false) {
-  return segs.map((s) => `<div class="utt" data-start="${s.start}">${playable ? `<button class="ts ts-play" title="Слушать с этого места"><span class="ts-icon">▶</span>${fmtTs(s.start)}</button>` : `<span class="ts">${fmtTs(s.start)}</span>`}${s.label
-    ? `<button class="who who-btn" data-seg="${s.i}" title="Это сказал другой человек?">${esc(s.speaker)}:</button>`
-    : `<span class="who">${esc(s.speaker)}:</span>`} ${esc(s.text)}</div>`).join("");
+// Слова-паразиты: только показ и выгрузка — сама расшифровка не меняется.
+const FILLER_ONLY = /^(?:угу|ага|ну|ммм*|м-м|мм|э+|э-э|эм+|хм+|ага-ага|угу-угу|ну да|да-да)[\s.,!?…]*$/i;
+function cleanFillers(t) {
+  let x = " " + t + " ";
+  x = x.replace(/([\s,])(?:э+(?:-э+)?|м-м|мм+|эм+|хм+)(?=[\s,.!?…])/gi, "$1");
+  x = x.replace(/([\s,])(?:как бы|типа|короче|в общем-то|в общем|так сказать|это самое|скажем так|вот)\s*,/gi, "$1");
+  x = x.replace(/,\s*(?:как бы|типа|короче|так сказать|это самое)(?=[\s,.!?…])/gi, "");
+  x = x.replace(/(^\s*|[.!?…]\s+)(?:ну|вот|значит|так|короче)\s*,\s*/gi, "$1");
+  x = x.replace(/(?<!\p{L})(\p{L}+)(?:\s+\1)+(?!\p{L})/giu, "$1");  // «я я я» → «я»
+  x = x.replace(/\s+([,.!?…])/g, "$1").replace(/,{2,}/g, ",").replace(/\s{2,}/g, " ").trim().replace(/^[,.\s]+/, "");
+  return x ? x[0].toUpperCase() + x.slice(1) : x;
 }
+let CLEAN = false;
+try { CLEAN = localStorage.getItem("ma.clean") === "1"; } catch (_) {}
+function shownText(s) { return CLEAN ? cleanFillers(s.text) : s.text; }
+function visibleSegs(segs) { return CLEAN ? segs.filter((s) => !FILLER_ONLY.test(s.text.trim())) : segs; }
+
+function segmentsHtml(segs, playable = false, chapters = [], editable = false) {
+  let ci = 0;
+  return visibleSegs(segs).map((s) => {
+    let head = "";
+    while (ci < chapters.length && chapters[ci].start <= s.start + 0.5) {
+      const c = chapters[ci++];
+      const t = fmtTs(c.start).replace(/^00:/, "");
+      head += `<div class="chapter-h" id="ch${ci}" data-start="${c.start}"><span>${esc(c.title)}</span>${playable
+        ? `<button class="tc" data-t="${c.start}">▶ ${t}</button>` : `<span class="tc-off">${t}</span>`}</div>`;
+    }
+    return head + `<div class="utt" data-start="${s.start}" data-i="${s.i}">${playable ? `<button class="ts ts-play" title="Слушать с этого места"><span class="ts-icon">▶</span>${fmtTs(s.start)}</button>` : `<span class="ts">${fmtTs(s.start)}</span>`}${s.label
+      ? `<button class="who who-btn" data-seg="${s.i}" title="Это сказал другой человек?">${esc(s.speaker)}:</button>`
+      : `<span class="who">${esc(s.speaker)}:</span>`} <span class="utt-text">${esc(shownText(s))}</span>${editable
+      ? `<button class="edit-btn" data-edit="${s.i}" title="Исправить текст реплики">✎</button>` : ""}</div>`;
+  }).join("");
+}
+
+// Время [00:12:40] в протоколе, версиях и ответах чата → кнопка «▶ 12:40».
+const TIME_RE = /\[((?:\d{1,2}:)?\d{1,2}:\d{2})(?:\s*[–-]\s*(?:\d{1,2}:)?\d{1,2}:\d{2})?\]/g;
+function secOf(t) { return t.split(":").reduce((a, x) => a * 60 + +x, 0); }
+function linkTimes(html, playable) {
+  return html.replace(TIME_RE, (_, t) => playable
+    ? `<button class="tc" data-t="${secOf(t)}" title="Слушать с этого места">▶ ${t.replace(/^00:/, "")}</button>`
+    : `<span class="tc-off">${t.replace(/^00:/, "")}</span>`);
+}
+function stripTimes(md) { return md.replace(/\s*\[(?:\d{1,2}:)?\d{1,2}:\d{2}(?:\s*[–-]\s*(?:\d{1,2}:)?\d{1,2}:\d{2})?\]/g, ""); }
 
 function transcriptHtml(src) {
   const out = [];
@@ -202,15 +240,16 @@ async function loadMeetings() {
   } catch (e) {
     toast(e.message);
   }
+  renderFilters();
   renderList();
 }
 
 function renderList() {
   const q = $("search").value.trim().toLowerCase();
-  const items = S.meetings.filter((m) => !q || (m.title + " " + m.participants).toLowerCase().includes(q));
+  const items = S.meetings.filter((m) => passesFilter(m) && (!q || (m.title + " " + m.participants + " " + (m.topics || []).join(" ")).toLowerCase().includes(q)));
   const list = $("list");
   if (!items.length) {
-    list.innerHTML = `<div class="list-empty">${q ? "Ничего не нашлось" : "Пока нет ни одной встречи"}</div>`;
+    list.innerHTML = `<div class="list-empty">${q || FILTER.person || FILTER.topic ? "Ничего не нашлось" : "Пока нет ни одной встречи"}</div>`;
     return;
   }
   let html = "", group = null;
@@ -349,6 +388,7 @@ function renderMeeting() {
     llm ? "Протокол: " + llm : "",
     m.asr && S.settings.asr_engines[m.asr] ? "Распознавание: " + S.settings.asr_engines[m.asr].title : "",
   ].filter(Boolean).map((x) => `<span>${esc(x)}</span>`).join("")
+    + ((m.topics || []).length ? ` <span class="topics">${m.topics.map((t) => `<button class="topic-tag" data-topic="${esc(t)}" title="Все встречи на эту тему">#${esc(t)}</button>`).join("")}</span>` : "")
     + (m.source ? ` <button class="link small" id="mPeople">${m.expected && m.expected.length
       ? "По списку: " + esc(m.expected.join(", ")) + " · изменить" : "＋ Указать участников"}</button>` : "");
   if ($("mPeople")) $("mPeople").onclick = () => openPeople("meeting");
@@ -362,15 +402,16 @@ function renderMeeting() {
   const playing = $("audio").src && !$("audio").paused;
   $("player").hidden = !(m.can_play && (S.tab === "transcript" || playing));
   if (S.tab === "summary") {
-    $("mBody").innerHTML = stale + markdown(m.summary);
+    $("mBody").innerHTML = versionsBarHtml(m) + (VER.sel[m.id] ? versionBodyHtml(m) : stale + linkTimes(markdown(m.summary), m.can_play));
   } else if (S.tab === "chat") {
     $("mBody").innerHTML = meetingChatHtml(m);
     const inp = $("mcInput");
     if (inp) inp.value = MCHAT.draft[m.id] || "";
   } else {
     $("mBody").innerHTML = (m.segments && m.segments.length)
-      ? (stale || `<p class="muted small">${m.can_play ? "Нажмите на время у реплики, чтобы послушать с этого места. " : ""}Подписи неверны? Нажмите на имя у реплики и укажите, кто на самом деле говорил.</p>`)
-        + segmentsHtml(m.segments, m.can_play)
+      ? (stale || `<p class="muted small">${m.can_play ? "Нажмите на время у реплики, чтобы послушать с этого места. " : ""}Ошибка в тексте — ✎ у реплики (отмена — ⌘Z). Подпись неверна — нажмите на имя.</p>`)
+        + transcriptToolsHtml(m) + chaptersTocHtml(m)
+        + segmentsHtml(m.segments, m.can_play, m.chapters || [], !!m.source)
       : transcriptHtml(m.transcript);
     highlightPlaying(true);
   }
@@ -447,7 +488,7 @@ function meetingChatHtml(m) {
     ${log.map((h, i) => `<div class="q">${esc(h.q)}</div>` + (h.pending
       ? '<div class="a muted"><span class="spinner"></span> Читаю встречу и пишу ответ…</div>'
       : h.error ? `<div class="a err">${esc(h.error)}</div>`
-      : `<div class="a md"><button class="ghost small copy-a" type="button" data-copy-a="${i}">Копировать</button>${markdown(h.a)}</div>`)).join("")}
+      : `<div class="a md"><button class="ghost small copy-a" type="button" data-copy-a="${i}">Копировать</button>${linkTimes(markdown(h.a), m.can_play)}</div>`)).join("")}
     <form class="ask-form" id="mcForm">
       <textarea id="mcInput" rows="2" placeholder="Например: что решили по срокам? Кто отвечает за API?"></textarea>
       <button class="primary" type="submit">Спросить</button>
@@ -480,12 +521,23 @@ async function sendMeetingAsk(q) {
 
 // ---------- скачать: Word, PDF, Markdown ----------
 
+// Word: тот же текст, что на экране (версия, без времени, при желании без слов-паразитов).
+function exportMd(m, withTranscript) {
+  const v = currentVersion(m);
+  let md = stripTimes(v ? v.text : m.summary);
+  if (withTranscript && m.segments && m.segments.length) {
+    md += "\n\n## Расшифровка\n\n" + visibleSegs(m.segments).map((s) => `**[${fmtTs(s.start)}] ${s.speaker}:** ${shownText(s)}`).join("\n\n");
+  } else if (withTranscript) md += "\n\n## Расшифровка\n\n" + m.transcript;
+  return { title: v ? v.title : m.title, md };
+}
+
 function exportHtml(m, withTranscript) {
   const sub = [m.date, m.duration, m.participants ? "Участники: " + m.participants : ""].filter(Boolean).join(" · ");
-  let html = `<h1>${esc(m.title)}</h1><div class="sub">${esc(sub)}</div>` + markdown(m.summary);
+  const v = currentVersion(m);
+  let html = `<h1>${esc(v ? v.title : m.title)}</h1><div class="sub">${esc(sub)}</div>` + markdown(stripTimes(v ? v.text : m.summary));
   if (withTranscript) {
     html += "<h2>Расшифровка</h2>" + ((m.segments && m.segments.length)
-      ? m.segments.map((s) => `<div class="utt"><span class="ts">${fmtTs(s.start)}</span><span class="who">${esc(s.speaker)}:</span> ${esc(s.text)}</div>`).join("")
+      ? visibleSegs(m.segments).map((s) => `<div class="utt"><span class="ts">${fmtTs(s.start)}</span><span class="who">${esc(s.speaker)}:</span> ${esc(shownText(s))}</div>`).join("")
       : transcriptHtml(m.transcript));
   }
   return html;
@@ -502,8 +554,9 @@ $("exportDialog").addEventListener("close", async () => {
   toast(fmt === "pdf" ? "Готовлю PDF…" : "Сохраняю…", 2500);
   try {
     const r = await api("export", { method: "POST", body: {
-      id: S.current.id, format: fmt, transcript: withTr,
-      html: fmt === "pdf" ? exportHtml(S.current, withTr) : undefined } });
+      id: S.current.id, format: fmt, transcript: withTr, version: (currentVersion(S.current) || {}).id, clean: CLEAN,
+      html: fmt === "pdf" ? exportHtml(S.current, withTr) : undefined,
+      doc: fmt === "docx" ? exportMd(S.current, withTr) : undefined } });
     const name = r.path.split(/[\\/]/).pop();
     toast(r.manual ? "Страница открыта в браузере: выберите «Сохранить как PDF» в окне печати"
       : `Сохранено в «Загрузки»: ${name}`, 6000);
@@ -775,7 +828,53 @@ function tplMode(mode) {
   document.querySelectorAll("#tplModes .tab").forEach((t) => t.classList.toggle("active", t.dataset.mode === mode));
   $("tplPointsBox").hidden = mode !== "points";
   $("tplTextBox").hidden = mode !== "text";
+  $("tplPastBox").hidden = mode !== "past";
+  if (mode === "past") renderTplPast();
 }
+
+// Шаблон по прошлым встречам: выбираем встречи одного типа, модель протоколов предлагает шаблон.
+function tplPastMeetings() {
+  const n = +$("tplPastN").value, tpl = $("tplPastTpl").value, topic = $("tplPastTopic").value, person = $("tplPastPerson").value;
+  return S.meetings.filter((m) => (!tpl || m.template === tpl)
+    && (!topic || (m.topics || []).some((t) => t.toLowerCase() === topic))
+    && (!person || personsOf(m).includes(person))).slice(0, n);
+}
+function renderTplPast() {
+  const keep = (id) => $(id).value;
+  const fill = (id, opts, all) => { const v = keep(id); $(id).innerHTML = `<option value="">${all}</option>` + opts.map(([val, t]) => `<option value="${esc(val)}"${val === v ? " selected" : ""}>${esc(t)}</option>`).join(""); };
+  const tpls = (S.settings && S.settings.templates) || [];
+  const used = new Set(S.meetings.map((m) => m.template));
+  fill("tplPastTpl", tpls.filter((t) => used.has(t.id)).map((t) => [t.id, t.title]), "Любой");
+  fill("tplPastTopic", [...new Set(S.meetings.flatMap((m) => (m.topics || []).map((t) => t.toLowerCase())))].sort().map((t) => [t, t]), "Любая");
+  fill("tplPastPerson", [...new Set(S.meetings.flatMap(personsOf))].sort().map((p) => [p, p]), "Любой");
+  const ms = tplPastMeetings();
+  $("tplPastList").innerHTML = ms.length
+    ? `<div class="muted small">Встречи (${ms.length}):</div>` + ms.map((m) => `<div class="small">· ${esc(m.title)} <span class="muted">${esc(m.date.slice(0, 10))}</span></div>`).join("")
+    : '<div class="muted small">Нет подходящих встреч — ослабьте условия.</div>';
+  const b = S.settings && S.settings.template_backend;
+  $("tplPastWarn").className = "small warn-text";
+  $("tplPastWarn").textContent = !b
+    ? "Шаблон составляет облачная модель — локальному Qwen эта задача не по силам. Добавьте ключ Gemini, ChatGPT или Claude в Настройках."
+    : `Протоколы и расшифровки этих встреч уйдут в ${(S.settings.backends || {})[b] || "облачный сервис"}. Уточните, разрешено ли это для рабочих встреч.`;
+  $("tplPastGo").disabled = !b || ms.length < 2 || TPLGEN.busy;
+  $("tplPastGo").innerHTML = TPLGEN.busy ? '<span class="spinner"></span> Изучаю встречи…' : "Составить шаблон";
+}
+const TPLGEN = { busy: false };
+["tplPastN", "tplPastTpl", "tplPastTopic", "tplPastPerson"].forEach((id) => $(id).addEventListener("change", renderTplPast));
+$("tplPastGo").addEventListener("click", async () => {
+  const ms = tplPastMeetings();
+  if (ms.length < 2) return;
+  TPLGEN.busy = true; renderTplPast();
+  try {
+    const r = await api("template/generate", { method: "POST", body: { ids: ms.map((m) => m.id), hint: $("tplPastHint").value } });
+    if (!$("tplName").value.trim()) $("tplName").value = r.title;
+    $("tplText").value = r.text;
+    tplMode("text");
+    toast("Шаблон готов — проверьте и поправьте текст, затем «Сохранить»", 6000);
+  } catch (e) { toast(e.message, 6000); }
+  TPLGEN.busy = false;
+  if (!$("tplPastBox").hidden) renderTplPast();
+});
 document.querySelectorAll("#tplModes .tab").forEach((t) => t.addEventListener("click", () => tplMode(t.dataset.mode)));
 
 async function openTemplate(id, copy = false) {
@@ -1235,7 +1334,9 @@ document.querySelectorAll(".tab").forEach((t) =>
 $("copyBtn").addEventListener("click", async () => {
   const m = S.current;
   const last = (MCHAT.log[m.id] || []).filter((h) => h.a).pop();
-  const text = S.tab === "chat" ? (last ? last.a : "") : `# ${m.title}\n\n` + (S.tab === "summary" ? m.summary : m.transcript);
+  const v = S.tab === "summary" && currentVersion(m);
+  const text = S.tab === "chat" ? (last ? last.a : "") : v ? `# ${v.title}\n\n${v.text}`
+    : `# ${m.title}\n\n` + (S.tab === "summary" ? stripTimes(m.summary) : m.transcript);
   try {
     await navigator.clipboard.writeText(text);
     toast("Скопировано");
@@ -2137,6 +2238,248 @@ window.agentEvent = (name) => {
   if (name === "settings") $("settingsBtn").click();
 };
 
+// ---------- главы, правка расшифровки, версии протокола, фильтры, плеер ----------
+
+function transcriptToolsHtml(m) {
+  return `<div class="tr-tools">
+    <label class="check small" title="Убрать «э-э», «как бы», «типа», повторы слов и реплики из одного «угу». Сама расшифровка не меняется">
+      <input type="checkbox" id="cleanToggle"${CLEAN ? " checked" : ""}> Без слов-паразитов</label>
+    ${EDIT.undo.length ? '<button class="link small" type="button" id="undoEdit">↶ Отменить правку</button>' : ""}
+    ${m.source && !(m.chapters || []).length ? `<button class="ghost small" type="button" id="mkChapters"${CH.busy ? " disabled" : ""}>${CH.busy ? '<span class="spinner"></span> Делю на главы…' : "Разделить на главы"}</button>` : ""}
+  </div>`;
+}
+
+function chaptersTocHtml(m) {
+  const ch = m.chapters || [];
+  if (!ch.length) return "";
+  return `<nav class="toc"><div class="toc-head">Главы</div>${ch.map((c, i) =>
+    `<button class="toc-item" type="button" data-ch="${i + 1}"><span class="toc-t">${fmtTs(c.start).replace(/^00:/, "")}</span> ${esc(c.title)}</button>`).join("")}</nav>`;
+}
+
+const CH = { busy: false };
+async function makeChapters() {
+  const m = S.current;
+  CH.busy = true; renderMeeting();
+  try {
+    const r = await api("meeting/chapters", { method: "POST", body: { id: m.id } });
+    if (S.current && S.current.id === m.id) S.current = r;
+    toast("Готово: встреча разделена на главы");
+  } catch (e) { toast(e.message, 6000); }
+  CH.busy = false;
+  renderMeeting();
+}
+
+// Правка реплик и отмена (⌘Z): стек правок текущей встречи.
+const EDIT = { undo: [], meeting: null };
+function startEdit(i) {
+  const m = S.current;
+  const seg = m.segments.find((s) => s.i === i);
+  const row = document.querySelector(`#mBody .utt[data-i="${i}"]`);
+  if (!seg || !row) return;
+  const span = row.querySelector(".utt-text");
+  span.outerHTML = `<span class="utt-edit"><textarea rows="${Math.min(8, Math.ceil(seg.text.length / 90) + 1)}">${esc(seg.text)}</textarea>
+    <span class="utt-edit-btns"><button class="primary small" type="button" data-save="${i}">Сохранить</button>
+    <button class="ghost small" type="button" data-cancel-edit>Отмена</button>
+    <span class="muted small">Enter — сохранить, Esc — отмена; пустой текст удалит реплику</span></span></span>`;
+  const ta = row.querySelector("textarea");
+  ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+async function saveEdit(i, text, { recordUndo = true } = {}) {
+  const m = S.current;
+  try {
+    const r = await api("segment/edit", { method: "POST", body: { id: m.id, index: i, text } });
+    if (EDIT.meeting !== m.id) { EDIT.undo = []; EDIT.meeting = m.id; }
+    if (recordUndo && r.old) EDIT.undo.push(text.trim() ? { kind: "edit", i, text: r.old.text } : { kind: "restore", i, seg: r.old });
+    S.current = r.meeting;
+    renderMeeting();
+  } catch (e) { toast(e.message, 5000); }
+}
+async function undoEdit() {
+  const m = S.current;
+  if (!m || EDIT.meeting !== m.id || !EDIT.undo.length) return;
+  const op = EDIT.undo.pop();
+  try {
+    if (op.kind === "edit") {
+      const r = await api("segment/edit", { method: "POST", body: { id: m.id, index: op.i, text: op.text } });
+      S.current = r.meeting;
+    } else {
+      S.current = await api("segment/restore", { method: "POST", body: { id: m.id, index: op.i, segment: op.seg } });
+    }
+    renderMeeting();
+    toast("Правка отменена");
+  } catch (e) { toast(e.message, 5000); }
+}
+
+// Версии протокола под адресата: «письмо коллегам», «для CEO»…
+const VER = { sel: {}, pending: {}, draft: {} };
+function currentVersion(m) {
+  const id = m && VER.sel[m.id];
+  return id && id !== "new" ? (m.versions || []).find((v) => v.id === id) || null : null;
+}
+function versionsBarHtml(m) {
+  if (!m.source) return "";
+  const sel = VER.sel[m.id] || "";
+  const vs = m.versions || [];
+  return `<div class="ver-bar">
+    <button class="ver-tab${!sel ? " active" : ""}" type="button" data-ver="">Протокол</button>
+    ${vs.map((v) => `<button class="ver-tab${sel === v.id ? " active" : ""}" type="button" data-ver="${esc(v.id)}" title="${esc(v.title)} — «${esc(v.request)}»">${esc(v.label || v.title)}</button>`).join("")}
+    ${VER.pending[m.id] ? '<span class="ver-tab pending"><span class="spinner"></span> Пишу…</span>' : ""}
+    <button class="ver-tab add${sel === "new" ? " active" : ""}" type="button" data-ver="new" title="Протокол или письмо под адресата — своими словами">＋ Для кого?</button>
+  </div>`;
+}
+function versionBodyHtml(m) {
+  const sel = VER.sel[m.id];
+  if (sel === "new") {
+    const ex = m.version_examples || [];
+    return `<form class="ver-form" id="verForm">
+      <p class="muted small">Напишите, какой документ нужен и для кого — модель подстроит язык, длину и подробности под адресата.
+        Основной протокол не изменится.</p>
+      <div class="quick">${ex.map((x) => `<button class="ghost small" type="button" data-ver-ex="${esc(x)}">${esc(x)}</button>`).join("")}</div>
+      <textarea id="verInput" rows="3" placeholder="Например: протокол для CEO — на полстраницы, начни с вывода, что нужно от него; без технических деталей">${esc(VER.draft[m.id] || "")}</textarea>
+      <button class="primary" type="submit"${VER.pending[m.id] ? " disabled" : ""}>Составить</button>
+    </form>`;
+  }
+  const v = currentVersion(m);
+  if (!v) return "";
+  return `<div class="ver-head muted small">Запрос: «${esc(v.request)}»
+    <button class="link small" type="button" data-ver-del="${esc(v.id)}">Удалить версию</button></div>
+    ${linkTimes(markdown(v.text), m.can_play)}`;
+}
+async function createVersion(request) {
+  const m = S.current;
+  if (!request.trim() || VER.pending[m.id]) return;
+  VER.pending[m.id] = request;
+  VER.draft[m.id] = "";
+  VER.sel[m.id] = "";
+  renderMeeting();
+  try {
+    const r = await api("meeting/version", { method: "POST", body: { id: m.id, request } });
+    if (S.current && S.current.id === m.id) { S.current = r.meeting; VER.sel[m.id] = r.version.id; }
+  } catch (e) {
+    toast(e.message, 6000);
+    VER.draft[m.id] = request;
+    VER.sel[m.id] = "new";
+  }
+  delete VER.pending[m.id];
+  if (S.current && S.current.id === m.id) renderMeeting();
+}
+
+$("mBody").addEventListener("click", async (e) => {
+  const t = e.target;
+  const tc = t.closest(".tc");
+  if (tc) { playFrom(+tc.dataset.t); return; }
+  const toc = t.closest("[data-ch]");
+  if (toc) {
+    const h = $("ch" + toc.dataset.ch);
+    if (h) { h.scrollIntoView({ block: "start", behavior: "smooth" }); h.classList.add("flash"); setTimeout(() => h.classList.remove("flash"), 1800); }
+    return;
+  }
+  if (t.id === "mkChapters") { makeChapters(); return; }
+  if (t.id === "undoEdit") { undoEdit(); return; }
+  const ed = t.closest("[data-edit]");
+  if (ed) { startEdit(+ed.dataset.edit); return; }
+  const sv = t.closest("[data-save]");
+  if (sv) { saveEdit(+sv.dataset.save, sv.closest(".utt").querySelector("textarea").value); return; }
+  if (t.closest("[data-cancel-edit]")) { renderMeeting(); return; }
+  const vt = t.closest("[data-ver]");
+  if (vt) { VER.sel[S.current.id] = vt.dataset.ver; renderMeeting(); if (vt.dataset.ver === "new") $("verInput")?.focus(); return; }
+  const vx = t.closest("[data-ver-ex]");
+  if (vx) { $("verInput").value = vx.dataset.verEx; VER.draft[S.current.id] = vx.dataset.verEx; $("verInput").focus(); return; }
+  const vd = t.closest("[data-ver-del]");
+  if (vd) {
+    if (!confirm("Удалить эту версию? Основной протокол останется.")) return;
+    try {
+      S.current = await api(`meeting/version?id=${encodeURIComponent(S.current.id)}&vid=${encodeURIComponent(vd.dataset.verDel)}`, { method: "DELETE" });
+      VER.sel[S.current.id] = "";
+      renderMeeting();
+    } catch (err) { toast(err.message); }
+  }
+});
+$("mBody").addEventListener("change", (e) => {
+  if (e.target.id !== "cleanToggle") return;
+  CLEAN = e.target.checked;
+  try { localStorage.setItem("ma.clean", CLEAN ? "1" : "0"); } catch (_) {}
+  renderMeeting();
+});
+$("mBody").addEventListener("submit", (e) => {
+  if (e.target.id !== "verForm") return;
+  e.preventDefault();
+  createVersion($("verInput").value);
+});
+$("mBody").addEventListener("input", (e) => {
+  if (e.target.id === "verInput" && S.current) VER.draft[S.current.id] = e.target.value;
+});
+$("mBody").addEventListener("keydown", (e) => {
+  const ta = e.target.closest(".utt-edit textarea");
+  if (ta) {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(+ta.closest(".utt").dataset.i, ta.value); }
+    if (e.key === "Escape") { e.preventDefault(); renderMeeting(); }
+  }
+});
+$("mMeta").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-topic]");
+  if (!b) return;
+  FILTER.topic = b.dataset.topic;
+  renderFilters();
+  renderList();
+  toast(`Показаны встречи на тему «${b.dataset.topic}»`);
+});
+
+// Плеер: скорость, пробел — пауза, ← → — 10 секунд; ⌘Z — отменить правку расшифровки.
+try { $("speed").value = localStorage.getItem("ma.speed") || "1"; } catch (_) {}
+$("audio").playbackRate = +$("speed").value;
+$("audio").addEventListener("loadedmetadata", () => { $("audio").playbackRate = +$("speed").value; });
+$("speed").addEventListener("change", () => {
+  $("audio").playbackRate = +$("speed").value;
+  try { localStorage.setItem("ma.speed", $("speed").value); } catch (_) {}
+});
+document.addEventListener("keydown", (e) => {
+  if (S.view !== "meeting" || !S.current || document.querySelector("dialog[open]")) return;
+  const tag = (e.target.tagName || "").toLowerCase();
+  if (["input", "textarea", "select"].includes(tag) || e.target.isContentEditable) return;
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "z" && S.tab === "transcript") {
+    e.preventDefault(); undoEdit(); return;
+  }
+  if (e.metaKey || e.ctrlKey || e.altKey || !S.current.can_play) return;
+  const a = $("audio");
+  const loaded = a.dataset.id === S.current.id;
+  if (e.key === " " || e.code === "Space") {
+    e.preventDefault();
+    if (!loaded) playFrom(0); else if (a.paused) a.play().catch(() => {}); else a.pause();
+  } else if (loaded && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+    e.preventDefault();
+    a.currentTime = Math.max(0, a.currentTime + (e.key === "ArrowLeft" ? -10 : 10));
+  }
+});
+
+// Фильтры списка: участник и тема.
+const FILTER = { person: "", topic: "" };
+const GENERIC_SPEAKER = /^(Я|Собеседник(\s*\d+)?|Speaker\s*\d+)$/i;
+function personsOf(m) {
+  return (m.participants || "").split(",").map((x) => x.trim().replace(/[*?]|\s*\(\?\)$/g, "").trim()).filter((x) => x && !GENERIC_SPEAKER.test(x));
+}
+function renderFilters() {
+  const count = (arr) => { const c = new Map(); arr.forEach((x) => c.set(x, (c.get(x) || 0) + 1)); return [...c.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "ru")); };
+  const persons = count(S.meetings.flatMap(personsOf));
+  const topics = count(S.meetings.flatMap((m) => (m.topics || []).map((t) => t.toLowerCase())));
+  $("filters").hidden = !persons.length && !topics.length;
+  const opts = (list, all, cur) => `<option value="">${all}</option>` + list.map(([x, n]) =>
+    `<option value="${esc(x)}"${x === cur ? " selected" : ""}>${esc(x)} (${n})</option>`).join("");
+  $("fPerson").innerHTML = opts(persons, "Все участники", FILTER.person);
+  $("fTopic").innerHTML = opts(topics, "Все темы", FILTER.topic.toLowerCase());
+  $("fPerson").hidden = !persons.length;
+  $("fTopic").hidden = !topics.length;
+  $("fPerson").classList.toggle("on", !!FILTER.person);
+  $("fTopic").classList.toggle("on", !!FILTER.topic);
+}
+function passesFilter(m) {
+  if (FILTER.person && !personsOf(m).includes(FILTER.person)) return false;
+  if (FILTER.topic && !(m.topics || []).some((t) => t.toLowerCase() === FILTER.topic.toLowerCase())) return false;
+  return true;
+}
+$("fPerson").addEventListener("change", () => { FILTER.person = $("fPerson").value; renderFilters(); renderList(); });
+$("fTopic").addEventListener("change", () => { FILTER.topic = $("fTopic").value; renderFilters(); renderList(); });
+
 // ---------- старт ----------
 
 (async function init() {
@@ -2158,3 +2501,4 @@ window.agentEvent = (name) => {
   showUpdateDone();
   setTimeout(autoCheckUpdates, 4000);  // тихая проверка обновлений (GitVerse/GitLab — не чаще раза в сутки)
 })();
+

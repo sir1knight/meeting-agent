@@ -368,3 +368,70 @@ dialog .check { font-weight: 400; }
 .upd-done-changes { max-height: 300px; overflow: auto; padding: 4px 2px; }
 .upd-done-changes ul { margin: 4px 0 10px; padding-left: 20px; }
 .upd-done-changes li { margin: 3px 0; }
+
+/* фильтры списка встреч */
+.filters { display: flex; gap: 6px; margin: 0 14px 8px; }
+.filters select { flex: 1; min-width: 0; font: inherit; font-size: 12px; padding: 4px 6px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--bg); color: var(--muted); }
+.filters select.on { color: var(--accent); border-color: var(--accent); }
+
+/* темы встречи */
+.topics { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.topic-tag { border: 0; background: var(--code); color: var(--muted); border-radius: 999px; padding: 1px 8px; font: inherit;
+  font-size: 12px; cursor: pointer; }
+.topic-tag:hover { color: var(--accent); }
+
+/* время в протоколе, версиях, чате и главах */
+.md .tc { display: inline-flex; align-items: center; gap: 3px; border: 0; border-radius: 999px; padding: 0 7px; margin-left: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font: inherit; font-size: 11.5px;
+  font-variant-numeric: tabular-nums; line-height: 1.6; cursor: pointer; vertical-align: 1px; white-space: nowrap; }
+.md .tc:hover { background: var(--accent); color: #fff; }
+.md .tc-off { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; margin-left: 4px; }
+
+/* инструменты расшифровки и главы */
+.tr-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin: 0 0 12px; }
+.toc { border: 1px solid var(--line); border-radius: 10px; background: var(--card); padding: 8px 10px; margin: 0 0 16px; }
+.toc-head { font-size: 12px; color: var(--muted); margin: 0 0 4px; }
+.toc-item { display: block; width: 100%; text-align: left; border: 0; background: none; color: var(--text); font: inherit;
+  padding: 3px 4px; border-radius: 6px; cursor: pointer; }
+.toc-item:hover { background: var(--hover); }
+.toc-t { display: inline-block; min-width: 54px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.md .chapter-h { display: flex; align-items: center; gap: 8px; margin: 22px 0 8px; padding-top: 10px; border-top: 1px solid var(--line);
+  font-weight: 600; font-size: 15px; scroll-margin-top: 70px; }
+.md .chapter-h:first-of-type { margin-top: 6px; }
+.md .chapter-h.flash { color: var(--accent); }
+
+/* правка реплики */
+.md .utt .edit-btn { visibility: hidden; border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 13px;
+  padding: 0 4px; margin-left: 2px; }
+.md .utt:hover .edit-btn { visibility: visible; }
+.md .utt .edit-btn:hover { color: var(--accent); }
+.utt-edit { display: block; margin-top: 4px; }
+.utt-edit textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 6px 8px; border: 1px solid var(--accent);
+  border-radius: 8px; background: var(--bg); color: var(--text); resize: vertical; }
+.utt-edit-btns { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+
+/* версии протокола под адресата */
+.ver-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+.ver-tab { border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 999px; padding: 3px 12px;
+  font: inherit; font-size: 13px; cursor: pointer; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ver-tab:hover { background: var(--hover); }
+.ver-tab.active { background: var(--active); border-color: var(--accent); color: var(--accent); }
+.ver-tab.add { border-style: dashed; color: var(--muted); }
+.ver-tab.pending { color: var(--muted); cursor: default; display: inline-flex; align-items: center; gap: 6px; }
+.ver-form textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 8px 10px; border: 1px solid var(--line);
+  border-radius: 10px; background: var(--bg); color: var(--text); margin: 0 0 8px; resize: vertical; }
+.ver-head { margin: 0 0 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+
+/* плеер */
+#speed { font: inherit; font-size: 12px; padding: 3px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+.keys-hint { white-space: nowrap; }
+@media (max-width: 760px) { .keys-hint { display: none; } }
+
+/* шаблон по прошлым встречам */
+.tpl-past-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.tpl-past-row select { width: 100%; }
+@media (max-width: 700px) { .tpl-past-row { grid-template-columns: 1fr 1fr; } }
+.tpl-past-list { margin: 8px 0; max-height: 140px; overflow: auto; }
+.warn-text { color: var(--warn); }
+#tplPastBox > * { margin-bottom: 8px; }

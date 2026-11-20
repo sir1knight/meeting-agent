@@ -12,7 +12,10 @@ from pathlib import Path
 from . import config
 
 BUILTIN_TITLES = {"meeting": "Рабочая встреча", "standup": "Стендап",
-                  "client": "Встреча с партнёром", "interview": "Custdev-интервью"}
+                  "client": "Встреча с партнёром", "interview": "Custdev-интервью",
+                  "demo": "Демо продукта", "brainstorm": "Мозговой штурм", "sales": "Продажа (MEDDIC)",
+                  "hiring": "Собеседование кандидата", "prd": "Требования к продукту (PRD)",
+                  "lecture": "Конспект лекции или вебинара"}
 USER_DIR = config.HOME / "templates"
 _TITLE_RE = re.compile(r"^<!--\s*title:\s*(.*?)\s*-->\s*\n?", re.S)
 
@@ -111,3 +114,82 @@ def from_points(title: str, points: str, notes: str = "") -> str:
             "- Нет ответственного или срока — «не указан»; пустой раздел — «—».\n"
             + (f"- {notes.strip()}\n" if notes.strip() else "")
             + "- Пиши по-русски, коротко и по делу.")
+
+
+GEN_SYSTEM = ("Ты помогаешь настроить приложение, которое пишет протоколы рабочих встреч на русском языке. "
+              "Твоя задача — по примерам встреч одного типа составить инструкцию-шаблон, по которой модель потом "
+              "будет писать протоколы таких встреч. Пиши шаблон по-русски.")
+
+GEN_PROMPT = """Ниже {n} прошлых встреч одного типа — протоколы и расшифровки (сокращённые).
+
+{meetings}
+
+=== ЗАДАНИЕ ===
+Ты видел {n} встреч одного типа. НЕ пересказывай их и не пиши протокол какой-то из них.
+Составь ШАБЛОН — пустую форму-инструкцию, по которой модель потом будет писать протоколы любых встреч такого типа.
+Изучи, что на таких встречах обычно обсуждают, какие решения, цифры, артефакты и роли важны, какие термины
+используют участники, — и сделай под это разделы.
+
+Требования:
+- Формат — как в примере ниже: вступительная фраза, строка «TITLE: <…>», разделы «##» с подсказками
+  в угловых скобках <что сюда писать>, где нужно — таблицы, в конце «Правила:».
+- Внутри разделов — только подсказки в угловых скобках, а не содержание конкретных встреч. Никаких имён,
+  дат, сумм и фактов из встреч выше.
+- Обязательно оставь задачи (кто, что, срок) и открытые вопросы, если такие встречи их предполагают.
+{hint}
+Пример формата (шаблон обычной рабочей встречи):
+---
+{example}
+---
+
+Ответ — строго:
+NAME: <название шаблона, 2–5 слов, например «Еженедельный синк проекта»>
+<текст шаблона>"""
+
+
+def cloud_backend(cfg: dict) -> str | None:
+    """Облачная модель для шаблонов: та, что пишет протоколы, иначе та, что в умном поиске, иначе любая с ключом.
+    Локальному Qwen такая задача не по силам (пересказывает встречу вместо шаблона)."""
+    keys = {"gemini": bool(config.read_secret("gemini_key")), "openai": bool(config.openai_key(cfg)),
+            "claude": bool(config.anthropic_key(cfg))}
+    for b in (cfg["llm"].get("backend"), cfg.get("ask", {}).get("backend")):
+        if b == "claude-code" or keys.get(b):
+            return b
+    return next((b for b, ok in keys.items() if ok), None)
+
+
+def generate(meetings: list[dict], hint: str, cfg: dict) -> dict:
+    """meetings: [{"title", "date", "summary", "transcript"}] → {"title", "text"} — черновик шаблона."""
+    from .ask import _fit_transcript, _llm
+
+    if len(meetings) < 2:
+        raise ValueError("Нужно хотя бы две встречи одного типа")
+    backend = cloud_backend(cfg)
+    if not backend:
+        raise ValueError("Шаблоны по прошлым встречам составляет облачная модель — добавьте ключ Gemini, "
+                         "ChatGPT или Claude в Настройках")
+    budget = 300000
+    per = budget // len(meetings)
+    blocks = []
+    for i, m in enumerate(meetings, 1):
+        summary = re.sub(r"\s*\[(?:\d{1,2}:)?\d{1,2}:\d{2}\]", "", m.get("summary", ""))[: per // 2]
+        tr = _fit_transcript(m.get("transcript", ""), m.get("title", ""), max(0, per - len(summary)))
+        blocks.append(f"### Встреча {i}: {m.get('title', '')} ({m.get('date', '')})\n"
+                      f"Протокол:\n{summary}\n\nРасшифровка:\n{tr[:max(0, per - len(summary))]}")
+    prompt = GEN_PROMPT.format(n=len(meetings), example=text("meeting"),
+                               hint=f"- Пожелание пользователя: {hint.strip()}\n" if hint.strip() else "",
+                               meetings="\n\n".join(blocks))
+    run_cfg = dict(cfg, ask=dict(cfg.get("ask", {}), backend=backend))  # та же модель, что пишет протоколы
+    for attempt in range(2):
+        answer = _llm(run_cfg, prompt, GEN_SYSTEM).strip()
+        m = re.match(r"\s*\**NAME\**\s*:\s*(.+)", answer)
+        title = m.group(1).strip(" «»\"*") if m else "Шаблон по прошлым встречам"
+        body = answer[m.end():].strip() if m else answer
+        body = re.sub(r"^-{3,}\s*|\s*-{3,}$", "", body).strip()
+        # Шаблон — это форма с подсказками <…>, а не пересказ встречи.
+        if "TITLE:" in body and len(body) >= 80 and len(re.findall(r"<[^<>\n]{3,}>", body)) >= 3:
+            return {"title": title[:80], "text": body}
+        prompt += ("\n\nВНИМАНИЕ: в прошлый раз получился пересказ встречи. Нужна пустая форма: разделы с "
+                   "подсказками в угловых скобках <…>, без фактов из встреч.")
+    raise ValueError("Модель не составила шаблон (получился пересказ встречи). Попробуйте ещё раз, "
+                     "выберите другие встречи или облачную модель по ключу API")

@@ -20,13 +20,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import config, models, osutil, participants, pipeline, playback, voices
+from . import chapters, config, models, osutil, participants, pipeline, playback, versions, voices
 from .summarize import claude_cli
 
 log = logging.getLogger(__name__)
 UI_DIR = config.ROOT / "ui"
 STAGES = {"transcribe": "Расшифровка", "diarize": "Разделение собеседников",
-          "refine": "Уточняю, кто что сказал", "voices": "Узнаю голоса", "names": "Угадываю имена", "summarize": "Составление протокола"}
+          "refine": "Уточняю, кто что сказал", "voices": "Узнаю голоса", "names": "Угадываю имена", "summarize": "Составление протокола", "chapters": "Делю встречу на главы"}
 BACKENDS = {"local": f"На {osutil.PC} (Qwen)", "claude-code": "Claude по подписке (Claude Code)",
             "claude": "Claude API по ключу", "gemini": "Gemini API по ключу",
             "openai": "ChatGPT (OpenAI API) по ключу"}
@@ -160,6 +160,13 @@ def _note_info(path: Path, full: bool = False) -> dict:
         err = src / pipeline.PROTOCOL_ERROR if src and src.is_dir() else None
         info["protocol_error"] = err.read_text(encoding="utf-8").strip() if err and err.exists() else ""
         info["expected"] = participants.read(src) if src and src.is_dir() else []
+        info["versions"] = versions.list_all(src if src and src.is_dir() else None)
+        info["version_examples"] = versions.EXAMPLES
+    src = Path(info["source"]) if info["source"] else None
+    ch = chapters.read(src if src and src.is_dir() else None)
+    info["topics"] = ch["topics"]
+    if full:
+        info["chapters"] = ch["chapters"]
     return info
 
 
@@ -242,6 +249,12 @@ def _gemini_model(name):
     return gemini_model(name)
 
 
+def _template_backend(cfg: dict) -> str | None:
+    from .templates import cloud_backend
+
+    return cloud_backend(cfg)
+
+
 def get_settings(cfg: dict) -> dict:
     from . import ask as ask_mod
 
@@ -266,6 +279,7 @@ def get_settings(cfg: dict) -> dict:
         "ask_backend": ask_mod.backend(cfg),
         "ask_backends": ask_mod.BACKENDS,
         "gemini_key_set": bool(config.read_secret("gemini_key")),
+        "template_backend": _template_backend(cfg),
         "gemini_model": _gemini_model(cfg.get("gemini", {}).get("model")),
         "openai_key_set": bool(config.openai_key(cfg)),
         "openai_model": cfg.get("openai", {}).get("model", "gpt-5"),
@@ -637,6 +651,64 @@ class Handler(BaseHTTPRequestHandler):
         voices.reassign(cfg, Path(info["source"]), int(data.get("index", -1)), str(data.get("to", "")), note)
         self._json(_note_info(note, full=True))
 
+    def _note_work(self, d: dict) -> tuple[dict, Path, Path]:
+        cfg = config.load()
+        note = _note_path(cfg, str(d.get("id", "")))
+        info = _note_info(note)
+        src = Path(info["source"]) if info["source"] else None
+        if not src or not src.is_dir():
+            raise ValueError("У этой встречи нет исходной записи")
+        return cfg, note, src
+
+    def api_post_segment_edit(self, q):
+        """{"id", "index", "text"} — исправить текст реплики; пустой текст удаляет реплику.
+        Ответ: встреча и прежняя реплика (для отмены)."""
+        d = self._data()
+        cfg, note, src = self._note_work(d)
+        index = int(d.get("index", -1))
+        old = voices.raw_segment(src, index)
+        voices.edit_text(src, index, str(d.get("text", "")), note)
+        self._json({"meeting": _note_info(note, full=True), "old": old})
+
+    def api_post_segment_restore(self, q):
+        """{"id", "index", "segment"} — вернуть удалённую реплику (отмена удаления)."""
+        d = self._data()
+        cfg, note, src = self._note_work(d)
+        seg = d.get("segment") or {}
+        if not isinstance(seg, dict) or "start" not in seg or "text" not in seg:
+            raise ValueError("Нечего восстанавливать")
+        voices.insert_segment(src, int(d.get("index", 0)), seg, note)
+        self._json(_note_info(note, full=True))
+
+    def api_post_meeting_chapters(self, q):
+        """Главы и темы для встречи, обработанной до их появления (или заново)."""
+        from .ask import _llm
+        from .ask import backend as ask_backend
+
+        d = self._data()
+        cfg, note, src = self._note_work(d)
+        segs = voices.apply_names(voices._read_segments(src)["segments"], src)
+        data = chapters.build(segs, lambda p: _llm(cfg, p, chapters.SYSTEM), 12000 if ask_backend(cfg) == "local" else 60000,
+                              summary=_note_info(note, full=True)["summary"])
+        if not data["chapters"]:
+            raise ValueError("Модель не смогла разделить встречу на главы — попробуйте ещё раз")
+        chapters.save(src, data)
+        self._json(_note_info(note, full=True))
+
+    def api_post_meeting_version(self, q):
+        """{"id", "request"} — документ по встрече под адресата («письмо коллегам», «для CEO»…)."""
+        d = self._data()
+        cfg, note, src = self._note_work(d)
+        info = _note_info(note, full=True)
+        v = versions.create(src, info["title"], info["date"], info["summary"], info["transcript"],
+                            str(d.get("request", "")), cfg)
+        self._json({"version": v, "meeting": _note_info(note, full=True)})
+
+    def api_delete_meeting_version(self, q):
+        cfg, note, src = self._note_work({"id": q.get("id", "")})
+        versions.delete(src, q.get("vid", ""))
+        self._json(_note_info(note, full=True))
+
     def api_get_audio(self, q):
         """Звук встречи для плеера, с поддержкой Range (перемотка)."""
         cfg = config.load()
@@ -748,10 +820,11 @@ class Handler(BaseHTTPRequestHandler):
             out = export.unique_path(folder, name, ".md")
             out.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
         elif fmt == "docx":
-            md = info["summary"]
-            if d.get("transcript") and info["transcript"]:
+            doc = d.get("doc") if isinstance(d.get("doc"), dict) else {}
+            md = str(doc.get("md") or "") or re.sub(r"\s*\[(?:\d{1,2}:)?\d{1,2}:\d{2}\]", "", info["summary"])
+            if not doc and d.get("transcript") and info["transcript"]:
                 md += "\n\n## Расшифровка\n\n" + info["transcript"]
-            out = export.to_docx(export.unique_path(folder, name, ".docx"), info["title"], sub, md)
+            out = export.to_docx(export.unique_path(folder, name, ".docx"), str(doc.get("title") or info["title"]), sub, md)
         elif fmt == "pdf":
             html_text = export.print_html(info["title"], str(d.get("html", "")))
             out = export.to_pdf(export.unique_path(folder, name, ".pdf"), html_text)
@@ -766,6 +839,21 @@ class Handler(BaseHTTPRequestHandler):
         self._json({"path": str(out)})
 
     # --- свои шаблоны протоколов ---
+    def api_post_template_generate(self, q):
+        """{"ids": [...], "hint": "…"} — черновик шаблона по прошлым встречам одного типа (не сохраняется)."""
+        from . import templates
+        d = self._data()
+        cfg = config.load()
+        ids = [str(x) for x in (d.get("ids") or [])][:30]
+        meetings = []
+        for i in ids:
+            try:
+                info = _note_info(_note_path(cfg, i), full=True)
+            except LookupError:
+                continue
+            meetings.append({k: info[k] for k in ("title", "date", "summary", "transcript")})
+        self._json(templates.generate(meetings, str(d.get("hint", "")), cfg))
+
     def api_get_template(self, q):
         from . import templates
         self._json(templates.get(q.get("id", "")))

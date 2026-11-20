@@ -481,6 +481,39 @@ def reassign(cfg: dict, work: Path, index: int, to: str, note: Path | None) -> N
     rewrite_transcript(work, note)
 
 
+def edit_text(work: Path, index: int, text: str, note: Path | None) -> None:
+    """Исправить текст реплики (ошибка распознавания). Пустой текст — реплика удаляется."""
+    seg_data = _read_segments(work)
+    segs = seg_data["segments"]
+    if not 0 <= index < len(segs):
+        raise LookupError("Реплика не найдена")
+    text = " ".join(text.split())
+    if text:
+        segs[index]["text"] = text
+        segs[index]["edited"] = True
+    else:
+        del segs[index]
+    (work / SEGMENTS_FILE).write_text(json.dumps(seg_data, ensure_ascii=False), encoding="utf-8")
+    rewrite_transcript(work, note)
+
+
+def insert_segment(work: Path, index: int, seg: dict, note: Path | None) -> None:
+    """Вернуть удалённую реплику на место (отмена удаления)."""
+    seg_data = _read_segments(work)
+    segs = seg_data["segments"]
+    keep = {k: seg[k] for k in ("start", "end", "text", "speaker", "spk", "edited") if k in seg}
+    segs.insert(max(0, min(index, len(segs))), keep)
+    (work / SEGMENTS_FILE).write_text(json.dumps(seg_data, ensure_ascii=False), encoding="utf-8")
+    rewrite_transcript(work, note)
+
+
+def raw_segment(work: Path, index: int) -> dict:
+    segs = _read_segments(work)["segments"]
+    if not 0 <= index < len(segs):
+        raise LookupError("Реплика не найдена")
+    return dict(segs[index])
+
+
 def rewrite_transcript(work: Path, note: Path | None) -> None:
     """Обновить в заметке расшифровку и участников по текущей разметке (протокол не трогаем)."""
     from . import merge

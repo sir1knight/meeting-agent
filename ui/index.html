@@ -23,6 +23,10 @@
     </div>
     <button id="nextPeople" class="next-people" title="Имена помогают распознать речь и узнать собеседников"></button>
     <input id="search" type="search" placeholder="Найти или спросить о встречах…" title="Enter — задать вопрос по всем встречам">
+    <div id="filters" class="filters" hidden>
+      <select id="fPerson" title="Встречи с участником"><option value="">Все участники</option></select>
+      <select id="fTopic" title="Встречи на тему"><option value="">Все темы</option></select>
+    </div>
     <div id="jobs"></div>
     <nav id="list" aria-label="Список встреч"></nav>
     <button id="updatesBtn" class="upd-banner" type="button" hidden title="Обновления и компоненты">
@@ -64,7 +68,11 @@
       </header>
       <div id="player" class="player" hidden>
         <audio id="audio" controls preload="none"></audio>
+        <select id="speed" title="Скорость воспроизведения">
+          <option value="1">1×</option><option value="1.25">1,25×</option><option value="1.5">1,5×</option>
+          <option value="1.75">1,75×</option><option value="2">2×</option></select>
         <label class="check small"><input type="checkbox" id="follow" checked> Следить за текстом</label>
+        <span class="muted small keys-hint" title="Пробел — пауза, ← → — 10 секунд назад/вперёд">Пробел · ← →</span>
       </div>
       <article id="mBody" class="md"></article>
     </section>
@@ -142,6 +150,21 @@
     <div class="tabs" id="tplModes">
       <button type="button" class="tab active" data-mode="points">Из пунктов или чек-листа</button>
       <button type="button" class="tab" data-mode="text">Своя инструкция</button>
+      <button type="button" class="tab" data-mode="past">По прошлым встречам</button>
+    </div>
+    <div id="tplPastBox" hidden>
+      <p class="muted small">Модель изучит протоколы и расшифровки последних встреч одного типа и предложит шаблон — его можно поправить перед сохранением.</p>
+      <div class="tpl-past-row">
+        <label>Сколько встреч <select id="tplPastN"><option>3</option><option selected>5</option><option>10</option><option>20</option></select></label>
+        <label>Шаблон встреч <select id="tplPastTpl"></select></label>
+        <label>Тема <select id="tplPastTopic"></select></label>
+        <label>Участник <select id="tplPastPerson"></select></label>
+      </div>
+      <div id="tplPastList" class="tpl-past-list"></div>
+      <label>Что важно в шаблоне (по желанию)
+        <input type="text" id="tplPastHint" placeholder="Например: отдельный раздел про риски и бюджет"></label>
+      <div id="tplPastWarn" class="small"></div>
+      <button type="button" class="primary" id="tplPastGo">Составить шаблон</button>
     </div>
     <div id="tplPointsBox">
       <label>Пункты — каждый с новой строки. Можно вставить чек-лист или план документа

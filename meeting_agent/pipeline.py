@@ -256,6 +256,20 @@ def base_names(theirs: list[dict], speakers: dict, prefix: str) -> dict[str, str
     return {label: f"{prefix} {i}" for i, label in enumerate(labels, 1)}
 
 
+def make_chapters(work: Path, segments: list[dict], cfg: dict, summary: str = "") -> None:
+    """Главы и темы встречи — той же моделью, что писала протокол; не вышло — не беда, встреча и так готова."""
+    from . import chapters
+    from .summarize import chat, chunk_size
+
+    stage("chapters")
+    log.info("Главы и темы…")
+    try:
+        data = chapters.build(segments, lambda p: chat(cfg, p, chapters.SYSTEM), min(chunk_size(cfg), 60000), summary)
+        chapters.save(work, data)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Главы не составлены: %s", e)
+
+
 def _write_note(path: Path, work: Path, segments: list[dict], total: float, started: datetime,
                 cfg: dict, template: str) -> Path:
     (work / "transcript.md").write_text(merge.to_markdown(segments), encoding="utf-8")
@@ -289,6 +303,8 @@ def _write_note(path: Path, work: Path, segments: list[dict], total: float, star
         notify(cfg, "Протокол не составлен", "Расшифровка сохранена — составьте протокол позже")
         title = f"Встреча {started:%d.%m %H:%M}"
         summary = f"> Протокол не составлен: {e}"
+    if not error_file.exists():
+        make_chapters(work, segments, cfg, summary)
     from .gpu import stop_server
 
     stop_server()  # Qwen на видеокарте (Windows) больше не нужен — освобождаем видеопамять
