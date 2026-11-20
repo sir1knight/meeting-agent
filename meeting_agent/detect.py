@@ -14,13 +14,131 @@ def zoom_windows() -> list[tuple[str, str]]:
     return _windows_win(lambda owner: "zoom" in owner) if IS_WIN else _windows_mac()
 
 
-BROWSERS = ("chrome.exe", "msedge.exe", "browser.exe", "firefox.exe", "opera.exe", "brave.exe", "vivaldi.exe")
+BROWSERS = ("chrome.exe", "msedge.exe", "browser.exe", "firefox.exe", "opera.exe", "opera_gx.exe", "brave.exe",
+            "vivaldi.exe", "yandex.exe", "arc.exe", "dia.exe")
+# Программы звонков (Windows, по имени exe). corp — российские и корпоративные площадки; включаются одной галочкой.
+CALL_APPS = {
+    "teams": ("ms-teams.exe", "teams.exe", "msteams"),
+    "telemost": ("telemost.exe", "yandextelemost.exe", "telemost"),
+    "jazz": ("jazz.exe", "sberjazz.exe", "salutejazz"),
+    "trueconf": ("trueconf.exe",),
+    "ktalk": ("ktalk.exe",),
+    "vkcalls": ("vkcalls.exe",),
+    "dion": ("dion.exe",),
+    "webex": ("webex.exe", "ciscocollabhost.exe", "atmgr.exe"),
+}
+CORP = ("jazz", "trueconf", "ktalk", "vkcalls", "dion", "webex")
 WEB_CALL_TITLES = ("meet.google.com", "google meet", "meet –", "meet -", "телемост", "telemost", "microsoft teams",
                    "teams.microsoft", "jitsi", "jazz", "контур.толк", "webex")
 
 
 def mic_users_win() -> list[str]:
-    """Программы, которые сейчас пишут микрофон. Windows ведёт журнал доступа к микрофону
+    """Программы, которые сейчас пишут микрофон: аудиосессии Windows (точно и сразу), плюс журнал
+    доступа к микрофону в реестре (на случай, если сессии не прочитались). Имена — в нижнем регистре."""
+    users = []
+    try:
+        users = mic_sessions_win()
+    except Exception as e:  # noqa: BLE001 — нет COM или WASAPI: остаётся реестр
+        log.debug("Аудиосессии не прочитались: %s", e)
+    return users + [u for u in _mic_users_registry() if u not in users]
+
+
+# --- аудиосессии WASAPI через ctypes (без pycaw/comtypes) ---
+_CLSID_ENUM = "{BCDE0395-E52F-467C-8E3D-C4579291692E}"
+_IID_ENUM = "{A95664D2-9614-4F35-A746-DE8DB63617E6}"
+_IID_ASM2 = "{77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F}"
+_IID_ASC2 = "{BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D}"
+
+
+def _guid(text: str):
+    import ctypes
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("d1", ctypes.c_uint32), ("d2", ctypes.c_uint16), ("d3", ctypes.c_uint16), ("d4", ctypes.c_ubyte * 8)]
+
+    g = GUID()
+    ctypes.oledll.ole32.CLSIDFromString(ctypes.c_wchar_p(text), ctypes.byref(g))
+    return g
+
+
+def _call(obj, index: int, *args, restype=None):
+    """Метод COM-объекта по номеру в таблице (vtable)."""
+    import ctypes
+
+    vtbl = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    types = [ctypes.c_void_p if type(a).__name__ == "CArgObject" else type(a) for a in args]
+    fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *types)(vtbl[index])
+    hr = fn(obj, *args)
+    if hr < 0:
+        raise OSError(f"COM 0x{hr & 0xFFFFFFFF:08X}")
+    return hr
+
+
+def _release(obj) -> None:
+    if obj:
+        _call(obj, 2)
+
+
+def mic_sessions_win() -> list[str]:
+    """exe программ с активной сессией записи на любом микрофоне (как детектор mymeet).
+    Своя запись не считается. Поток должен быть с инициализированным COM (CoInitializeEx)."""
+    import ctypes
+    import os
+
+    from .osutil import process_image
+
+    CLSCTX_ALL, E_CAPTURE, ACTIVE = 23, 1, 1
+    enum = ctypes.c_void_p()
+    ctypes.oledll.ole32.CoCreateInstance(ctypes.byref(_guid(_CLSID_ENUM)), None, CLSCTX_ALL,
+                                         ctypes.byref(_guid(_IID_ENUM)), ctypes.byref(enum))
+    pids: set[int] = set()
+    coll = ctypes.c_void_p()
+    try:
+        _call(enum, 3, ctypes.c_uint(E_CAPTURE), ctypes.c_uint(ACTIVE), ctypes.byref(coll))
+        n = ctypes.c_uint()
+        _call(coll, 3, ctypes.byref(n))
+        for i in range(n.value):
+            dev, mgr, sess_enum = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+            try:
+                _call(coll, 4, ctypes.c_uint(i), ctypes.byref(dev))
+                _call(dev, 3, ctypes.byref(_guid(_IID_ASM2)), ctypes.c_uint(CLSCTX_ALL), ctypes.c_void_p(), ctypes.byref(mgr))
+                _call(mgr, 5, ctypes.byref(sess_enum))
+                count = ctypes.c_int()
+                _call(sess_enum, 3, ctypes.byref(count))
+                for j in range(count.value):
+                    ctl, ctl2 = ctypes.c_void_p(), ctypes.c_void_p()
+                    try:
+                        _call(sess_enum, 4, ctypes.c_int(j), ctypes.byref(ctl))
+                        state = ctypes.c_int()
+                        _call(ctl, 3, ctypes.byref(state))
+                        if state.value != 1:  # AudioSessionStateActive
+                            continue
+                        _call(ctl, 0, ctypes.byref(_guid(_IID_ASC2)), ctypes.byref(ctl2))
+                        pid = ctypes.c_uint32()
+                        _call(ctl2, 14, ctypes.byref(pid))
+                        if pid.value and pid.value != os.getpid():
+                            pids.add(pid.value)
+                    except OSError:
+                        continue
+                    finally:
+                        _release(ctl2)
+                        _release(ctl)
+            except OSError:
+                continue
+            finally:
+                _release(sess_enum)
+                _release(mgr)
+                _release(dev)
+    finally:
+        _release(coll)
+        _release(enum)
+    names = [process_image(p) for p in pids]
+    return [n.rsplit("\\", 1)[-1].lower() for n in names if n and "meeting agent" not in n.lower()]
+
+
+def _mic_users_registry() -> list[str]:
+    """Журнал доступа к микрофону (Параметры → Конфиденциальность → Микрофон); у идущей записи
+    LastUsedTimeStop = 0.
     (Параметры → Конфиденциальность → Микрофон); у идущей записи LastUsedTimeStop = 0.
     Имена — путь к exe (с «#» вместо «\\») или имя пакета Магазина, в нижнем регистре."""
     import winreg
@@ -65,10 +183,14 @@ def active_platform(titles: list[str], platforms: list[str], current: str | None
     if not IS_WIN:
         return None
     users = mic_users_win()
-    if "teams" in platforms and any("msteams" in u or "teams.exe" in u for u in users):
-        return "teams"
-    if "telemost" in platforms and any("telemost" in u for u in users):
-        return "telemost"
+
+    def uses(names: tuple) -> bool:
+        return any(n in u for u in users for n in names)
+
+    for app in ("teams", "telemost") + CORP:
+        enabled = app in platforms or (app in CORP and "corp" in platforms)
+        if enabled and uses(CALL_APPS[app]):
+            return app
     if "meet" in platforms and any(u.endswith(BROWSERS) for u in users):
         if current == "meet" or _windows_win(lambda o: o.endswith(BROWSERS), WEB_CALL_TITLES):
             return "meet"

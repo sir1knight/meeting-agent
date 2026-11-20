@@ -154,6 +154,7 @@ class Recording:
         self.busy = False
         self.lock = threading.RLock()
         self.on_change = lambda: None
+        self.toast = lambda title, text: None  # уведомление из трея (задаёт App)
         self.auto_record = True
         self.platforms = ["zoom", "teams", "telemost", "meet"]
         self.calendar = False
@@ -166,6 +167,11 @@ class Recording:
         self.hits = 0
         self.last_seen = 0.0
         self.skip_meeting = False  # запись остановили вручную, окно встречи ещё открыто
+        self.hold_until = 0.0      # после смены микрофона 20 с не останавливаем запись (как у mymeet)
+        self.mic_id: str | None = None
+        self.silent_checks = 0
+        self.warning: str | None = None
+        self.health_at = 0.0
 
     @property
     def is_recording(self) -> bool:
@@ -198,13 +204,57 @@ class Recording:
 
     def watch(self) -> None:
         from .detect import active_platform
+        from .winrec import _com_init
 
+        _com_init()  # аудиосессии WASAPI читаются через COM в этом потоке
         while True:
             time.sleep(self.poll)
             try:
+                self._watch_devices()
                 self._tick(active_platform(self.window_titles, self.platforms, self.auto_source))
+                self._check_health()
             except Exception:
                 log.exception("Проверка встречи не удалась")
+
+    def _watch_devices(self) -> None:
+        """Сменился микрофон по умолчанию (наушники, док-станция): запись переходит на него и 20 с не
+        останавливается — пока программа звонка переключается, микрофон может «пропасть»."""
+        try:
+            import soundcard as sc
+
+            mid = sc.default_microphone().id
+        except Exception:
+            return
+        if self.mic_id and mid != self.mic_id:
+            log.info("Сменился микрофон по умолчанию")
+            self.hold_until = time.time() + 20
+            self.last_seen = max(self.last_seen, time.time())
+            if self.recorder:
+                self.recorder.restart_mic()
+        self.mic_id = mid
+
+    def _check_health(self) -> None:
+        """Раз в 15 с: дорожки живы (упавшие перезапускаются), микрофон не молчит нулями."""
+        if not self.recorder or time.time() - self.health_at < 15:
+            return
+        self.health_at = time.time()
+        h = self.recorder.health()
+        mic = h.get("mic", {})
+        if mic.get("restarted"):
+            self.silent_checks = 0
+        else:
+            self.silent_checks = self.silent_checks + 1 if mic.get("peak", 1) == 0 else 0
+        warn = None
+        if self.silent_checks >= 3:
+            warn = "Микрофон не слышно — не выключен ли он (кнопка или Параметры → Звук) и тот ли выбран по умолчанию"
+        elif h.get("others", {}).get("restarted"):
+            warn = "Пропадал звук собеседников — восстановил запись"
+        if warn != self.warning:
+            self.warning = warn
+            self.notify_backend()
+            if warn:
+                log.warning(warn)
+                self.toast("Meeting Agent: проверьте запись", warn)
 
     def _tick(self, found: str | None) -> None:
         if self.busy:
@@ -228,7 +278,7 @@ class Recording:
             if self.hits >= self.start_after and found:
                 self.hits = 0
                 self.start(found)
-        elif self.auto_source and now - self.last_seen > self.stop_grace:
+        elif self.auto_source and now - self.last_seen > self.stop_grace and now >= self.hold_until:
             self.stop("встреча закончилась")
 
     def toggle_manual(self) -> None:
@@ -266,6 +316,7 @@ class Recording:
                 threading.Thread(target=_message, args=(f"Не удалось начать запись.\n\n{e}",), daemon=True).start()
                 return
             self.recorder, self.source, self.since, self.last_seen = rec, source, time.time(), time.time()
+            self.warning, self.silent_checks, self.health_at = None, 0, time.time()
             log.info("Запись началась (%s): %s", source, folder.name)
             self.notify_backend()
             self.on_change()
@@ -311,6 +362,8 @@ class Recording:
             body["error"] = error
         if self.skip_meeting and not self.is_recording:
             body["skip_meeting"] = True
+        if self.warning and self.is_recording:
+            body["warning"] = self.warning
         self.backend.post("recording", body)
 
     def status_text(self) -> str:
@@ -328,7 +381,9 @@ class Recording:
             self.backend.post("calendar", {"folder": str(folder), **ev})
 
 
-PLATFORM_TITLES = {"zoom": "Zoom", "teams": "Teams", "telemost": "Телемоста", "meet": "в браузере"}
+PLATFORM_TITLES = {"zoom": "Zoom", "teams": "Teams", "telemost": "Телемоста", "meet": "в браузере",
+                   "jazz": "SaluteJazz", "trueconf": "TrueConf", "ktalk": "Контур.Толка", "vkcalls": "VK Звонков",
+                   "dion": "Дион", "webex": "Webex"}
 
 # Текущее событие календаря Outlook: только из уже запущенного Outlook (сами его не открываем).
 _OUTLOOK_PS = r"""
@@ -575,6 +630,7 @@ class App:
             self.backend.stop()
             return
         self.recording.on_change = self.refresh
+        self.recording.toast = lambda title, text: self.icon and self.icon.notify(text, title)
         self.recording.reload_settings()
         self.recording.notify_backend()
         threading.Thread(target=self.recording.watch, daemon=True).start()

@@ -324,7 +324,7 @@ def save_settings(data: dict) -> None:
     if isinstance(data.get("glossary"), list):
         put("whisper", "glossary", [str(x).strip() for x in data["glossary"] if str(x).strip()][:200])
     if isinstance(data.get("auto_platforms"), list):
-        put("zoom", "platforms", [p for p in ("zoom", "teams", "telemost", "meet") if p in data["auto_platforms"]])
+        put("zoom", "platforms", [p for p in ("zoom", "teams", "telemost", "meet", "corp") if p in data["auto_platforms"]])
     if isinstance(data.get("window_titles"), list):
         put("zoom", "window_titles", [str(x).strip() for x in data["window_titles"] if str(x).strip()])
     for key, (section, name) in {"keep_audio": ("output", "keep_audio"),

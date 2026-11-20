@@ -25,6 +25,9 @@ if IS_WIN:
     _k32.GetCurrentProcess.restype = wintypes.HANDLE
     _k32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     _k32.SetPriorityClass.restype = wintypes.BOOL
+    _k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                ctypes.POINTER(wintypes.DWORD)]
+    _k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
     CREATE_NO_WINDOW = 0x08000000
 
 
@@ -173,3 +176,20 @@ def atomic_write_text(path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def process_image(pid: int) -> str:
+    """Windows: полный путь exe процесса ("" — нет доступа или процесса)."""
+    if not IS_WIN:
+        return ""
+    buf = ctypes.create_unicode_buffer(1024)
+    size = wintypes.DWORD(len(buf))
+    h = _k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        if _k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return buf.value
+        return ""
+    finally:
+        _k32.CloseHandle(h)

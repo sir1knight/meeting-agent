@@ -1415,7 +1415,8 @@ function renderRecording() {
   if (on) {
     const secs = rec.since ? Math.max(0, Math.floor(Date.now() / 1000 - rec.since)) : 0;
     const t = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
-    const PLAT = { zoom: "Zoom", teams: "Teams", telemost: "Телемоста", meet: "в браузере" };
+    const PLAT = { zoom: "Zoom", teams: "Teams", telemost: "Телемоста", meet: "в браузере", jazz: "SaluteJazz",
+      trueconf: "TrueConf", ktalk: "Контур.Толка", vkcalls: "VK Звонков", dion: "Дион", webex: "Webex" };
     $("recText").textContent = `${PLAT[rec.source] ? "Запись встречи " + PLAT[rec.source] : "Идёт запись"} · ${t}`;
   }
   $("recWarn").hidden = !(on && rec.warning);
@@ -2073,7 +2074,8 @@ function renderSettings() {
       <div class="field" id="sPlatforms"${s.auto_record ? "" : " hidden"}><div class="hint">Где замечать начало встречи:</div>
         ${[["zoom", "Zoom", "по окну встречи"], ["teams", "Microsoft Teams", "когда Teams включает микрофон"],
            ["telemost", "Яндекс Телемост (программа)", "когда Телемост включает микрофон"],
-           ["meet", "Звонки в браузере", "Google Meet, Телемост, Teams в браузере: вкладка звонка и включённый микрофон"]]
+           ["meet", "Звонки в браузере", "Google Meet, Телемост, Teams в браузере: вкладка звонка и включённый микрофон"],
+           ...(IS_WIN ? [["corp", "SaluteJazz, TrueConf, Контур.Толк, VK Звонки, Дион, Webex", "когда программа включает микрофон"]] : [])]
           .map(([id, t, d]) => `<label class="check"><input type="checkbox" data-platform="${id}"${(s.auto_platforms || []).includes(id) ? " checked" : ""}> ${t} <span class="muted small">— ${d}</span></label>`).join("")}
         <div class="hint">${IS_WIN ? "Для Teams, Телемоста и браузера записывается весь звук компьютера."
           : "Teams, Телемост и браузер определяются по тому, кто пишет микрофон (нужна macOS 14.2 или новее), записывается весь звук системы."}</div></div>
