@@ -189,6 +189,7 @@ _gemini_models: dict[str, str] = {}  # заданная модель → раб�
 # Модели бесплатного уровня Gemini API (ноябрь 2026); основная — первая.
 GEMINI_FREE = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
 GEMINI_DEFAULT = GEMINI_FREE[0]
+GEMINI_BUSY = (500, 502, 503, 504)
 GEMINI_MIN_VERSION = (3, 1)  # старее — не показываем и не используем
 
 
@@ -213,13 +214,33 @@ def chat_gemini(cfg: dict, user: str, system: str = SYSTEM, model: str | None = 
     body = {"system_instruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             "generationConfig": {"temperature": 0.2}}
+    def call(m: str) -> requests.Response:
+        return _http("POST", f"{GEMINI}/models/{m}:generateContent", headers=headers, json=body, timeout=900)
+
     try:
-        r = _http("POST", f"{GEMINI}/models/{model}:generateContent", headers=headers, json=body, timeout=900)
+        r = call(model)
         if r.status_code == 404:  # модель сменили или убрали — берём актуальную того же семейства
             model = _pick_gemini_model(headers, "pro" if "pro" in wanted else "flash")
-            r = _http("POST", f"{GEMINI}/models/{model}:generateContent", headers=headers, json=body, timeout=900)
+            r = call(model)
+        # 500/502/503/504 — у Google перегрузка (часто у самой новой модели): повтор, потом соседняя модель.
+        for wait in (4, 12):
+            if r.status_code not in GEMINI_BUSY:
+                break
+            log.warning("Gemini %s перегружен (%s), повтор через %d с…", model, r.status_code, wait)
+            time.sleep(wait)
+            r = call(model)
+        if r.status_code in GEMINI_BUSY:
+            for other in [m for m in GEMINI_FREE if m != model]:
+                log.warning("Gemini %s перегружен — пробую %s", model, other)
+                r2 = call(other)
+                if r2.status_code not in GEMINI_BUSY and r2.status_code != 404:
+                    r, model = r2, other
+                    break
     except requests.RequestException as e:
         raise RuntimeError("Нет связи с Gemini API: проверьте интернет") from e
+    if r.status_code in GEMINI_BUSY:
+        raise RuntimeError(f"Gemini сейчас перегружен (ответ Google {r.status_code}) — это на стороне Google. "
+                           "Попробуйте через пару минут или выберите другую модель в Настройках → Gemini и ChatGPT.")
     if r.status_code == 429:
         hint = ("Бесплатный лимит обновляется со временем: попробуйте пересоздать протокол позже "
                 "или подключите оплату в Google AI Studio." if "flash" in model else
@@ -228,8 +249,12 @@ def chat_gemini(cfg: dict, user: str, system: str = SYSTEM, model: str | None = 
         raise RuntimeError(f"Исчерпан лимит Gemini API для модели {model}. {hint} Ответ Google: {_api_error(r)[:200]}")
     if r.status_code in (400, 401, 403):
         raise RuntimeError(f"Gemini API отказал: {_api_error(r)}")
-    r.raise_for_status()
-    _gemini_models[wanted] = model
+    if r.status_code >= 400:
+        raise RuntimeError(f"Gemini API ответил ошибкой {r.status_code}: {_api_error(r)[:200]}")
+    if model != wanted and model in GEMINI_FREE:
+        log.info("Ответил %s вместо перегруженной %s", model, wanted)
+    else:
+        _gemini_models[wanted] = model
     data = r.json()
     try:
         cand = data["candidates"][0]
