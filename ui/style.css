@@ -327,8 +327,11 @@ dialog .check { font-weight: 400; }
 .player { display: flex; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 2;
   background: var(--bg); padding: 8px 0; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
 .player audio { flex: 1; height: 34px; min-width: 0; }
-.md .utt .ts.play { cursor: pointer; }
-.md .utt .ts.play:hover { color: var(--accent); text-decoration: underline; }
+.md .utt .ts-play { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px 2px 6px; margin-right: 8px;
+  border: 0; border-radius: 999px; background: var(--chip, rgba(127,127,127,.14)); color: var(--muted);
+  font: inherit; font-size: 12px; font-variant-numeric: tabular-nums; line-height: 1.5; cursor: pointer; vertical-align: 1px; }
+.md .utt .ts-play .ts-icon { font-size: 9px; }
+.md .utt .ts-play:hover, .md .utt.playing .ts-play { background: var(--accent); color: #fff; }
 .md .utt.playing { background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 6px; }
 .quick { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
 .mchat .a { position: relative; }

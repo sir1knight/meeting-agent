@@ -2,7 +2,7 @@
 
 Сам замечает начало встречи в Zoom и записывает её. Когда встреча заканчивается, расшифровывает разговор, разделяет собеседников и пишет протокол: кратко, решения, задачи (кто, что, срок) и открытые вопросы.
 
-Работает на **Mac (Apple Silicon)** и **Windows 10/11**. Готовые сборки — в разделе «Релизы» репозитория на [GitVerse](https://gitverse.ru/sir1knight/Meeting_agent).
+Работает на **Mac (Apple Silicon)** и **Windows 10/11**. Готовые сборки — в [релизах на GitLab](https://gitlab.com/sir1knight/Meeting_agent/-/releases) (Mac, Windows: маленький установщик и полный архив). Код — на [GitVerse](https://gitverse.ru/sir1knight/Meeting_agent) и [GitLab](https://gitlab.com/sir1knight/Meeting_agent).
 
 **Звук и расшифровка всегда распознаются на вашем компьютере.** В сеть может уйти только текст расшифровки — и только если для протоколов выбран облачный вариант.
 
@@ -55,7 +55,7 @@
 ## Установка и обновления
 
 **Windows — два варианта:**
-- `Meeting-Agent-Windows-Setup.zip` (~25 МБ, лежит в релизах GitVerse) — маленький установщик: Python, код и `uv`. При первом запуске открывается окно «Установка компонентов» и скачивает пакеты Python (~350 МБ, 3–10 минут) с PyPI — строго версии из `requirements-windows.lock`. Нужен доступ к pypi.org.
+- `Meeting-Agent-Windows-Setup.zip` (~11 МБ, [релизы на GitLab](https://gitlab.com/sir1knight/Meeting_agent/-/releases)) — маленький установщик: Python и код; `uv` скачивается с PyPI. При первом запуске открывается окно «Установка компонентов» и скачивает пакеты Python (~350 МБ, 3–10 минут) с PyPI — строго версии из `requirements-windows.lock`. Нужен доступ к pypi.org.
 - `Meeting-Agent-Windows.zip` (~350 МБ) — полный архив, ничего не докачивает (для компьютеров без доступа к PyPI).
 
 **Mac:** `Meeting-Agent.zip` (~465 МБ) — приложение целиком.

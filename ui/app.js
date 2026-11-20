@@ -154,7 +154,7 @@ function fmtTs(sec) {
 }
 
 function segmentsHtml(segs, playable = false) {
-  return segs.map((s) => `<div class="utt" data-start="${s.start}"><span class="ts${playable ? " play" : ""}"${playable ? ' title="Слушать с этого места"' : ""}>${fmtTs(s.start)}</span>${s.label
+  return segs.map((s) => `<div class="utt" data-start="${s.start}">${playable ? `<button class="ts ts-play" title="Слушать с этого места"><span class="ts-icon">▶</span>${fmtTs(s.start)}</button>` : `<span class="ts">${fmtTs(s.start)}</span>`}${s.label
     ? `<button class="who who-btn" data-seg="${s.i}" title="Это сказал другой человек?">${esc(s.speaker)}:</button>`
     : `<span class="who">${esc(s.speaker)}:</span>`} ${esc(s.text)}</div>`).join("");
 }
@@ -413,7 +413,7 @@ function highlightPlaying(noScroll = false) {
   const t = a.currentTime;
   const utts = document.querySelectorAll("#mBody .utt[data-start]");
   let cur = null;
-  for (const el of utts) { if (+el.dataset.start <= t + 0.05) cur = el; else break; }
+  for (const el of utts) { if (+el.dataset.start <= t + 0.25) cur = el; else break; }
   if (cur === lastPlaying && cur && cur.classList.contains("playing")) return;
   document.querySelectorAll("#mBody .utt.playing").forEach((el) => el.classList.remove("playing"));
   lastPlaying = cur;
@@ -871,7 +871,7 @@ $("recPeople").addEventListener("click", () => openPeople("current"));
 // ---------- ручное разделение собеседников ----------
 
 $("mBody").addEventListener("click", (e) => {
-  const ts = e.target.closest(".ts.play");
+  const ts = e.target.closest(".ts-play");
   if (ts) { playFrom(+ts.closest(".utt").dataset.start); return; }
   const qb = e.target.closest("[data-quick]");
   if (qb) { sendMeetingAsk(QUICK[+qb.dataset.quick][1]); return; }
