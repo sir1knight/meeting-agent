@@ -56,7 +56,9 @@ def create(work: Path, title: str, date_str: str, summary: str, transcript: str,
     if not request:
         raise ValueError("Напишите, какой документ нужен и для кого")
     budget = 20000 if backend(cfg) == "local" else 400000
-    user = (f"Встреча: {title} ({date_str}).\n\n## Протокол\n{summary}\n\n## Расшифровка\n"
+    from .namefix import protocol_hint
+    hint = protocol_hint(cfg)
+    user = ((hint + "\n\n" if hint else "") + f"Встреча: {title} ({date_str}).\n\n## Протокол\n{summary}\n\n## Расшифровка\n"
             f"{_fit_transcript(transcript, request, budget)}\n\n"
             f"Запрос пользователя: {request}\n\n"
             "Подстрой язык, длину и подробность под адресата из запроса. Если запрос не называет адресата — "

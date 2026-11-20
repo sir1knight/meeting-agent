@@ -483,13 +483,14 @@ def reassign(cfg: dict, work: Path, index: int, to: str, note: Path | None) -> N
     rewrite_transcript(work, note)
 
 
-def edit_text(work: Path, index: int, text: str, note: Path | None) -> None:
+def edit_text(work: Path, index: int, text: str, note: Path | None) -> list[str]:
     """Исправить текст реплики (ошибка распознавания). Пустой текст — реплика удаляется."""
     seg_data = _read_segments(work)
     segs = seg_data["segments"]
     if not 0 <= index < len(segs):
         raise LookupError("Реплика не найдена")
     text = " ".join(text.split())
+    old = segs[index].get("text", "")
     if text:
         segs[index]["text"] = text
         segs[index]["edited"] = True
@@ -497,6 +498,12 @@ def edit_text(work: Path, index: int, text: str, note: Path | None) -> None:
         del segs[index]
     osutil.atomic_write_text((work / SEGMENTS_FILE), json.dumps(seg_data, ensure_ascii=False))
     rewrite_transcript(work, note)
+    # Новое написание имени или термина — в словарь распознавания: в следующих встречах его услышат верно.
+    from .namefix import learn_terms, remember
+    try:
+        return remember(learn_terms(old, text))
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def insert_segment(work: Path, index: int, seg: dict, note: Path | None) -> None:

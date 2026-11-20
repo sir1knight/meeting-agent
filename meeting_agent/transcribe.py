@@ -88,7 +88,9 @@ def _whisper_prompt(cfg: dict) -> str | None:
     from .voices import load_profiles
 
     # Имена участников (указанные вручную) и известные голоса — чтобы «Даша» не превращалась в «нашу».
-    names = of(cfg) + [p.get("name", "") for p in load_profiles(cfg)]
+    from .namefix import my_name
+
+    names = [my_name(cfg)] + of(cfg) + [p.get("name", "") for p in load_profiles(cfg)]
     glossary = list(dict.fromkeys([n for n in names if n] + list(cfg["whisper"].get("glossary") or [])))[:60]
     return ", ".join(glossary) if glossary else None
 

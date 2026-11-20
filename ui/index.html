@@ -62,6 +62,7 @@
           <div class="actions">
             <button id="copyBtn" class="ghost" title="Скопировать протокол в буфер обмена">Копировать</button>
             <button id="exportBtn" class="ghost" title="Сохранить в Word, PDF или Markdown">Скачать…</button>
+            <button id="replaceBtn" class="ghost" title="Найти и заменить слово по всей встрече: протокол, расшифровка, версии">Заменить…</button>
             <button id="redoBtn" class="ghost">Пересоздать…</button>
             <button id="revealBtn" class="ghost" title="Показать файл заметки в Finder">В Finder</button>
             <button id="deleteBtn" class="ghost danger">Удалить</button>
@@ -124,6 +125,23 @@
     <div id="updDoneBody"></div>
     <div class="dlg-actions">
       <button value="ok" class="primary">Отлично</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="replaceDialog">
+  <form method="dialog">
+    <h2>Найти и заменить</h2>
+    <p class="muted small">По всей встрече: название, протокол, реплики расшифровки и версии «Для кого?». Например, «Илья» → «Ильяс».</p>
+    <label>Найти <input type="text" id="rplFind" autocomplete="off"></label>
+    <label>Заменить на <input type="text" id="rplTo" autocomplete="off"></label>
+    <label class="check"><input type="checkbox" id="rplWord" checked> Только целое слово <span class="muted small">— «Илья» не заденет «Ильяс»</span></label>
+    <label class="check"><input type="checkbox" id="rplCase"> Учитывать регистр</label>
+    <label class="check"><input type="checkbox" id="rplGloss"> Добавить новое написание в словарь распознавания <span class="muted small">— чтобы в следующих встречах его слышали правильно</span></label>
+    <div id="rplCount" class="muted small"></div>
+    <div class="dlg-actions">
+      <button value="cancel" class="ghost">Отмена</button>
+      <button value="ok" class="primary" id="rplGo">Заменить</button>
     </div>
   </form>
 </dialog>

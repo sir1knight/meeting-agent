@@ -113,6 +113,7 @@ def _transcribe_all(work: Path, mic: Path | None, others: Path | None, meta: dic
             log.info("Микрофон молчал — пропускаю")
         else:
             mine = [dict(s, speaker=spk["me"]) for s in _with_live(work, "mic", mic16, cfg)]
+            _recheck_names(mine, mic16, cfg, work)
 
     if others and others.exists():
         oth16 = audio.to_16k_mono(others, work / "others_16k.wav")
@@ -151,6 +152,8 @@ def _transcribe_all(work: Path, mic: Path | None, others: Path | None, meta: dic
                 for s in theirs:
                     s["speaker"] = spk["others_prefix"]
 
+    if theirs and others and (work / "others_16k.wav").exists():
+        _recheck_names(theirs, work / "others_16k.wav", cfg, work)
     segments = merge.merge_tracks(
         mine, theirs,
         me_offset=meta.get("mic_start", t0) - t0,
@@ -159,6 +162,18 @@ def _transcribe_all(work: Path, mic: Path | None, others: Path | None, meta: dic
     for f in ("mic_16k.wav", "others_16k.wav"):
         (work / f).unlink(missing_ok=True)
     return segments, total
+
+
+def _recheck_names(segs: list[dict], wav16: Path, cfg: dict, work: Path) -> None:
+    """GigaAM путает похожие имена («Илья» вместо «Ильяс») — фразы с ними перепроверяет Whisper с подсказкой."""
+    from . import namefix
+
+    try:
+        n = namefix.recheck(segs, wav16, cfg, work)
+        if n:
+            log.info("Имена: исправлено %d", n)
+    except Exception as e:  # noqa: BLE001 — улучшение, не повод ронять обработку
+        log.warning("Перепроверка имён не удалась: %s", e)
 
 
 # ---------- распознанное по ходу встречи ----------

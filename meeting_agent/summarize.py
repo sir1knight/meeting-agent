@@ -601,6 +601,10 @@ def summarize(transcript: str, cfg: dict, template: str) -> tuple[str, str]:
     if listed:
         source = (f"Участники встречи (список составлен вручную, кроме «Я»): {', '.join(listed)}. "
                   "Пиши их имена именно так.\n\n" + source)
+    from .namefix import protocol_hint
+    hint = protocol_hint(cfg)
+    if hint:
+        source = hint + "\n\n" + source
     cal = cfg.get("meeting", {}).get("calendar") or {}
     if cal.get("title"):
         source = (f"Название встречи в календаре: «{cal['title']}». Используй его как подсказку "

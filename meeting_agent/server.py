@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import chapters, config, models, osutil, participants, pipeline, playback, versions, voices
+from . import chapters, config, editing, models, osutil, participants, pipeline, playback, versions, voices
 from .summarize import claude_cli
 
 log = logging.getLogger(__name__)
@@ -161,6 +161,7 @@ def _note_info(path: Path, full: bool = False) -> dict:
         info["protocol_error"] = err.read_text(encoding="utf-8").strip() if err and err.exists() else ""
         info["expected"] = participants.read(src) if src and src.is_dir() else []
         info["versions"] = versions.list_all(src if src and src.is_dir() else None)
+        info["can_undo"] = editing.can_undo(src if src and src.is_dir() else None)
         info["version_examples"] = versions.EXAMPLES
     src = Path(info["source"]) if info["source"] else None
     ch = chapters.read(src if src and src.is_dir() else None)
@@ -281,6 +282,7 @@ def get_settings(cfg: dict) -> dict:
         "template": cfg["output"]["template"],
         "templates": templates,
         "glossary": cfg["whisper"].get("glossary", []),
+        "my_name": cfg.get("me", {}).get("name", ""),
         "language": cfg["whisper"].get("language", "ru"),
         "keep_audio": cfg["output"].get("keep_audio", True),
         "diarization_enabled": cfg["diarization"].get("enabled", True),
@@ -332,6 +334,8 @@ def save_settings(data: dict) -> None:
     from . import templates as tpl_mod
     if "template" in data and tpl_mod.path(str(data["template"])):
         put("output", "template", data["template"])
+    if isinstance(data.get("my_name"), str):
+        put("me", "name", data["my_name"].strip()[:60])
     if isinstance(data.get("glossary"), list):
         put("whisper", "glossary", [str(x).strip() for x in data["glossary"] if str(x).strip()][:200])
     if isinstance(data.get("auto_platforms"), list):
@@ -677,6 +681,43 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("У этой встречи нет исходной записи")
         return cfg, note, src
 
+    def _note_src(self, d: dict) -> tuple[dict, Path, Path | None]:
+        """Как _note_work, но и для старых встреч без папки записи (правится только заметка)."""
+        cfg = config.load()
+        note = _note_path(cfg, str(d.get("id", "")))
+        src = Path(_note_info(note)["source"] or "/nonexistent")
+        return cfg, note, src if src.is_dir() else None
+
+    def api_post_meeting_summary(self, q):
+        """{"id", "text"} — протокол, поправленный вручную."""
+        d = self._data()
+        cfg, note, src = self._note_src(d)
+        editing.set_summary(note, src, str(d.get("text", "")))
+        self._json(_note_info(note, full=True))
+
+    def api_post_meeting_replace(self, q):
+        """{"id", "find", "replace", "whole_word", "case", "glossary"} — найти и заменить по всей встрече;
+        glossary — добавить новое написание в словарь распознавания (для следующих встреч)."""
+        d = self._data()
+        cfg, note, src = self._note_src(d)
+        repl = str(d.get("replace", ""))
+        counts = editing.replace(note, src, str(d.get("find", "")), repl,
+                                 bool(d.get("whole_word", True)), bool(d.get("case", False)))
+        if d.get("glossary") and repl.strip():
+            words = cfg["whisper"].get("glossary", [])
+            if repl.strip().lower() not in (w.lower() for w in words):
+                save_settings({"glossary": words + [repl.strip()]})
+        self._json({"counts": counts, "meeting": _note_info(note, full=True)})
+
+    def api_post_meeting_undo(self, q):
+        """Отменить последнюю правку протокола или замену."""
+        d = self._data()
+        cfg, note, src = self._note_src(d)
+        if not src:
+            raise ValueError("Отменить нельзя: у встречи нет папки записи")
+        editing.undo(note, src)
+        self._json(_note_info(note, full=True))
+
     def api_post_segment_edit(self, q):
         """{"id", "index", "text"} — исправить текст реплики; пустой текст удаляет реплику.
         Ответ: встреча и прежняя реплика (для отмены)."""
@@ -684,8 +725,8 @@ class Handler(BaseHTTPRequestHandler):
         cfg, note, src = self._note_work(d)
         index = int(d.get("index", -1))
         old = voices.raw_segment(src, index)
-        voices.edit_text(src, index, str(d.get("text", "")), note)
-        self._json({"meeting": _note_info(note, full=True), "old": old})
+        learned = voices.edit_text(src, index, str(d.get("text", "")), note)
+        self._json({"meeting": _note_info(note, full=True), "old": old, "learned": learned})
 
     def api_post_segment_restore(self, q):
         """{"id", "index", "segment"} — вернуть удалённую реплику (отмена удаления)."""

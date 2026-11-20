@@ -303,7 +303,9 @@ def meeting_ask(title: str, date_str: str, summary: str, transcript: str, questi
     local = backend(cfg) == "local"
     budget = 20000 if local else 400000  # Qwen: ~8 тыс. токенов на расшифровку; облачным — целиком
     past = "\n".join(f"Вопрос: {h['q']}\nОтвет: {h['a'][:1500]}" for h in history[-3:])
-    user = (f"Встреча: {title} ({date_str}).\n\n## Протокол\n{summary}\n\n## Расшифровка\n"
+    from .namefix import protocol_hint
+    hint = protocol_hint(cfg)
+    user = ((hint + "\n\n" if hint else "") + f"Встреча: {title} ({date_str}).\n\n## Протокол\n{summary}\n\n## Расшифровка\n"
             f"{_fit_transcript(transcript, question, budget)}\n\n"
             + (f"Предыдущий разговор:\n{past}\n\n" if past else "")
             + f"Сегодня {date.today():%d.%m.%Y}.\nЗадание: {question}")

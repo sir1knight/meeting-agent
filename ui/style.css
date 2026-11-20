@@ -446,3 +446,10 @@ dialog .check { font-weight: 400; }
 /* облачная модель не ответила — повторить на другой */
 .fallback { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .fallback .ghost { color: var(--text); }
+
+/* правка протокола и «найти и заменить» */
+.sum-tools { display: flex; gap: 14px; justify-content: flex-end; margin: -4px 0 6px; }
+.sum-edit textarea { width: 100%; box-sizing: border-box; min-height: 320px; font: 13px/1.5 ui-monospace, Menlo, monospace;
+  padding: 10px 12px; border: 1px solid var(--accent); border-radius: 10px; background: var(--bg); color: var(--text); resize: vertical; }
+#replaceDialog input[type=text] { width: 100%; box-sizing: border-box; }
+#rplCount { min-height: 18px; margin-top: 6px; }

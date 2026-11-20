@@ -402,7 +402,9 @@ function renderMeeting() {
   const playing = $("audio").src && !$("audio").paused;
   $("player").hidden = !(m.can_play && (S.tab === "transcript" || playing));
   if (S.tab === "summary") {
-    $("mBody").innerHTML = versionsBarHtml(m) + (VER.sel[m.id] ? versionBodyHtml(m) : stale + linkTimes(markdown(m.summary), m.can_play));
+    $("mBody").innerHTML = versionsBarHtml(m) + (VER.sel[m.id] ? versionBodyHtml(m)
+      : SUMEDIT.id === m.id ? summaryEditorHtml(m)
+      : stale + summaryToolsHtml(m) + linkTimes(markdown(m.summary), m.can_play));
   } else if (S.tab === "chat") {
     $("mBody").innerHTML = meetingChatHtml(m);
     const inp = $("mcInput");
@@ -418,6 +420,7 @@ function renderMeeting() {
   if ($("staleRedo")) $("staleRedo").onclick = () => redoProtocol();
   if ($("staleQwen")) $("staleQwen").onclick = () => redoProtocol("local");
   $("redoBtn").disabled = !m.source;
+  if (SUMEDIT.id && SUMEDIT.id !== m.id) SUMEDIT.id = null;
   renderSpeakers();
   if (S.tab === "summary") linkContacts($("mBody"));
 }
@@ -2054,8 +2057,12 @@ function renderSettings() {
       ${asrRadios(s)}
       <label class="check"><input type="checkbox" id="sLive"${s.live_enabled ? " checked" : ""}> Распознавать во время встречи — после встречи протокол готов быстрее</label>
       <div class="hint">Работает с ${IS_WIN ? "GigaAM" : "GigaAM и Whisper turbo"}, с пониженным приоритетом, чтобы не мешать Zoom. От батареи — не работает: всё досчитается после встречи.</div>
+      <div class="field"><label for="sMyName">Как вас зовут</label>
+        <div class="hint">К вам обращаются почти на каждой встрече: с именем распознавание пишет его правильно («Ильяс», а не «Илья»), а протокол подписывает ваши задачи по имени.</div>
+        <input type="text" id="sMyName" maxlength="60" placeholder="Например: Ильяс" value="${esc(s.my_name || "")}"></div>
       <div class="field"><label for="sGlossary">Глоссарий</label>
-        <div class="hint">Термины, имена и аббревиатуры, которые звучат на ваших встречах, — через запятую. Сильно помогает распознаванию.</div>
+        <div class="hint">Термины, имена и аббревиатуры, которые звучат на ваших встречах, — через запятую. Пополняется сам, когда вы исправляете имя или термин в расшифровке.
+          ${s.asr_engine === "gigaam" ? "С GigaAM фразы с похожими на эти имена словами перепроверяются Whisper (нужна скачанная модель Whisper)." : ""}</div>
         <textarea id="sGlossary">${esc(s.glossary.join(", "))}</textarea></div>
     </div>
 
@@ -2160,6 +2167,7 @@ function renderSettings() {
     } catch (e) { toast(e.message); }
   });
   $("sGlossary").onchange = (e) => save({ glossary: list(e.target.value) });
+  $("sMyName").onchange = (e) => save({ my_name: e.target.value.trim() }, e.target.value.trim() ? `Запомнил: вас зовут ${e.target.value.trim()}` : "Имя убрано");
   $("sTitles").onchange = (e) => save({ window_titles: list(e.target.value) });
   $("sDiar").onchange = async (e) => { await save({ diarization_enabled: e.target.checked }); renderSettings(); loadVoices(true); };
   $("sVoices").onchange = (e) => { save({ voices_enabled: e.target.checked }); loadVoices(true); };
@@ -2348,6 +2356,7 @@ async function saveEdit(i, text, { recordUndo = true } = {}) {
     const r = await api("segment/edit", { method: "POST", body: { id: m.id, index: i, text } });
     if (EDIT.meeting !== m.id) { EDIT.undo = []; EDIT.meeting = m.id; }
     if (recordUndo && r.old) EDIT.undo.push(text.trim() ? { kind: "edit", i, text: r.old.text } : { kind: "restore", i, seg: r.old });
+    if (r.learned && r.learned.length) toast(`В словарь распознавания: ${r.learned.join(", ")} — в следующих встречах это услышат правильно`, 6000);
     S.current = r.meeting;
     renderMeeting();
   } catch (e) { toast(e.message, 5000); }
@@ -2500,6 +2509,101 @@ $("mMeta").addEventListener("click", (e) => {
   renderFilters();
   renderList();
   toast(`Показаны встречи на тему «${b.dataset.topic}»`);
+});
+
+// Ручная правка протокола целиком, «найти и заменить» по всей встрече, отмена последней правки.
+const SUMEDIT = { id: null, busy: false };
+function summaryToolsHtml(m) {
+  return `<div class="sum-tools">
+    <button class="link small" type="button" id="sumEdit" title="Исправить текст протокола вручную">✎ Править протокол</button>
+    ${m.can_undo ? '<button class="link small" type="button" id="sumUndo" title="Вернуть встречу как было до последней правки или замены">↶ Отменить последнюю правку</button>' : ""}
+  </div>`;
+}
+function summaryEditorHtml(m) {
+  return `<div class="sum-edit">
+    <p class="muted small">Markdown: «## Раздел», «- пункт», таблицы «| … |». Время в скобках [00:12:40] станет кнопкой «▶».</p>
+    <textarea id="sumText" spellcheck="true">${esc(m.summary)}</textarea>
+    <div class="utt-edit-btns"><button class="primary" type="button" id="sumSave"${SUMEDIT.busy ? " disabled" : ""}>Сохранить</button>
+      <button class="ghost" type="button" id="sumCancel">Отмена</button>
+      <span class="muted small">⌘Enter — сохранить, Esc — отмена</span></div>
+  </div>`;
+}
+async function saveSummary() {
+  const m = S.current;
+  SUMEDIT.busy = true;
+  try {
+    S.current = await api("meeting/summary", { method: "POST", body: { id: m.id, text: $("sumText").value } });
+    SUMEDIT.id = null;
+    toast("Протокол сохранён");
+  } catch (e) { toast(e.message, 5000); }
+  SUMEDIT.busy = false;
+  renderMeeting();
+}
+async function undoMeetingEdit() {
+  try {
+    S.current = await api("meeting/undo", { method: "POST", body: { id: S.current.id } });
+    renderMeeting();
+    loadMeetings();
+    toast("Последняя правка отменена");
+  } catch (e) { toast(e.message, 5000); }
+}
+$("mBody").addEventListener("click", (e) => {
+  if (!S.current) return;
+  if (e.target.id === "sumEdit") { SUMEDIT.id = S.current.id; renderMeeting(); const t = $("sumText"); t.style.height = Math.max(320, t.scrollHeight + 10) + "px"; t.focus(); }
+  else if (e.target.id === "sumCancel") { SUMEDIT.id = null; renderMeeting(); }
+  else if (e.target.id === "sumSave") saveSummary();
+  else if (e.target.id === "sumUndo") undoMeetingEdit();
+});
+$("mBody").addEventListener("keydown", (e) => {
+  if (e.target.id !== "sumText") return;
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveSummary(); }
+  if (e.key === "Escape") { e.preventDefault(); SUMEDIT.id = null; renderMeeting(); }
+});
+
+function rplRegex() {
+  const f = $("rplFind").value.trim();
+  if (!f) return null;
+  const body = f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp($("rplWord").checked ? `(?<![\\p{L}\\p{N}_-])${body}(?![\\p{L}\\p{N}_-])` : body, "gu" + ($("rplCase").checked ? "" : "i"));
+}
+function rplPreview() {
+  const m = S.current, re = rplRegex();
+  if (!m || !re) { $("rplCount").textContent = ""; return; }
+  const n = (t) => ((t || "").match(re) || []).length;
+  const p = n(m.title) + n(m.summary);
+  const t = (m.segments && m.segments.length) ? m.segments.reduce((a, s) => a + n(s.text), 0) : n(m.transcript);
+  const v = (m.versions || []).reduce((a, x) => a + n(x.text) + n(x.title), 0);
+  $("rplCount").textContent = p + t + v
+    ? `Найдено: ${p + t + v} — в протоколе ${p}, в расшифровке ${t}${v ? `, в версиях ${v}` : ""}.`
+    : "Не найдено ни разу.";
+  $("rplGo").disabled = !(p + t + v) || !$("rplTo").value.trim();
+}
+["rplFind", "rplTo"].forEach((id) => $(id).addEventListener("input", rplPreview));
+["rplWord", "rplCase"].forEach((id) => $(id).addEventListener("change", rplPreview));
+$("replaceBtn").addEventListener("click", () => {
+  if (!S.current) return;
+  const sel = (window.getSelection && String(window.getSelection()).trim()) || "";
+  $("rplFind").value = sel.length && sel.length < 60 ? sel : "";
+  $("rplTo").value = "";
+  $("rplGloss").checked = true;
+  rplPreview();
+  $("replaceDialog").showModal();
+  ($("rplFind").value ? $("rplTo") : $("rplFind")).focus();
+});
+$("replaceDialog").addEventListener("close", async () => {
+  if ($("replaceDialog").returnValue !== "ok" || !S.current) return;
+  try {
+    const r = await api("meeting/replace", { method: "POST", body: {
+      id: S.current.id, find: $("rplFind").value, replace: $("rplTo").value,
+      whole_word: $("rplWord").checked, case: $("rplCase").checked, glossary: $("rplGloss").checked } });
+    S.current = r.meeting;
+    renderMeeting();
+    loadMeetings();
+    const c = r.counts;
+    toast(c.total ? `Заменено: ${c.total} — протокол ${c.protocol}, расшифровка ${c.transcript}${c.versions ? `, версии ${c.versions}` : ""}. Отменить — «↶ Отменить последнюю правку» в протоколе`
+      : "Ничего не найдено", 7000);
+    if ($("rplGloss").checked) S.settings = await api("settings");
+  } catch (e) { toast(e.message, 6000); }
 });
 
 // Плеер: скорость, пробел — пауза, ← → — 10 секунд; ⌘Z — отменить правку расшифровки.
