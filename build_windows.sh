@@ -13,6 +13,7 @@
 # (пересоздать: uv pip compile … — команда ниже, в шаге «Пакеты»).
 set -euo pipefail
 cd "$(dirname "$0")"
+python3 scripts/sync_version.py   # версия и «что нового» из CHANGELOG.md → version.json
 
 PY_TAG="20261021"
 PY_VER="3.12.15"

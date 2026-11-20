@@ -354,3 +354,5 @@ dialog .check { font-weight: 400; }
   font-size: 13px; text-align: left; cursor: pointer; }
 .upd-banner:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .upd-banner[hidden] { display: none; }
+.changes summary { cursor: pointer; color: var(--accent); margin: 2px 0; }
+.changes ul { margin: 2px 0 6px; padding-left: 18px; }

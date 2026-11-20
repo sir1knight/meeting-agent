@@ -171,7 +171,7 @@ def check(max_age_hours: float = 0) -> dict:
     m = remote_manifest(max_age_hours)
     latest = m.get("app", "0")
     need_shell = (m.get("shell") or {}).get(platform(), 1)
-    st.update(latest=latest, notes=m.get("notes", ""),
+    st.update(latest=latest, notes=m.get("notes", ""), changes=m.get("changes") or {}, date=m.get("date", ""),
               code_available=_vt(latest) > _vt(st["version"]) and latest != st["pending"],
               shell_needed=need_shell > st["shell"], shell_latest=need_shell)
     if osutil.IS_WIN:

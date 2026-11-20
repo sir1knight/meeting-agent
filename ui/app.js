@@ -575,7 +575,7 @@ function updWindowHtml() {
   else if (u.code_available && u.shell_needed) code = updRow("Код и интерфейс", '<span class="badge warn">нужно приложение целиком</span>',
     `Версии ${esc(u.latest)} нужна новая оболочка — скачайте приложение целиком со <a href="${esc(u.page)}" target="_blank">страницы проекта</a>.`);
   else if (u.code_available) code = updRow("Код и интерфейс", `<span class="badge warn">${esc(u.version)} → ${esc(u.latest)}</span>`,
-    esc(u.notes || ""), `<button class="primary small" type="button" data-upd="code"${UPD.busy ? " disabled" : ""}>${UPD.busy === "code" ? "Обновляю…" : "Обновить"}</button>`);
+    changesHtml(u), `<button class="primary small" type="button" data-upd="code"${UPD.busy ? " disabled" : ""}>${UPD.busy === "code" ? "Обновляю…" : "Обновить"}</button>`);
   else code = updRow("Код и интерфейс", `<span class="badge ok">${esc(u.version)} — последняя</span>`, "");
   out.push(code);
 
@@ -620,6 +620,14 @@ function updWindowHtml() {
     <button class="primary" type="button" data-upd="all"${!n || UPD.busy ? " disabled" : ""}>${UPD.busy === "all" ? "Обновляю…" : n ? `Обновить всё (${n})` : "Всё актуально"}</button>
     <button class="ghost" type="button" data-upd="close">Закрыть</button></div>`);
   return out.join("");
+}
+
+// «Что нового» версии с GitVerse (раздел CHANGELOG.md, перенесённый в version.json).
+function changesHtml(u) {
+  const groups = Object.entries(u.changes || {});
+  if (!groups.length) return esc(u.notes || "");
+  return `<details class="changes"><summary>Что нового в ${esc(u.latest)}${u.date ? ` (${esc(u.date)})` : ""}</summary>
+    ${groups.map(([g, items]) => `<div class="small"><b>${esc(g)}</b><ul>${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul></div>`).join("")}</details>`;
 }
 
 function paintUpdWindow() {
