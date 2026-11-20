@@ -149,12 +149,14 @@ class Recording:
     def __init__(self, backend: Backend):
         self.backend = backend
         self.recorder = None
-        self.source: str | None = None       # "manual" | "zoom"
+        self.source: str | None = None       # "manual" | "zoom" | "teams" | "telemost" | "meet"
         self.since: float | None = None
         self.busy = False
         self.lock = threading.RLock()
         self.on_change = lambda: None
         self.auto_record = True
+        self.platforms = ["zoom", "teams", "telemost", "meet"]
+        self.calendar = False
         self.window_titles = ["Zoom Meeting", "Zoom Webinar", "Конференция Zoom", "Вебинар Zoom"]
         self.poll = 3.0
         self.start_after = 2
@@ -174,6 +176,8 @@ class Recording:
         if not s:
             return
         self.auto_record = s.get("auto_record", True)
+        self.platforms = s.get("auto_platforms", self.platforms)
+        self.calendar = bool(s.get("calendar_participants", False))
         self.window_titles = s.get("window_titles") or self.window_titles
         self.recordings = Path(s.get("recordings_dir") or self.recordings)
         z = s.get("zoom") or {}
@@ -188,20 +192,25 @@ class Recording:
         self.backend.post("settings", {"auto_record": on})
         self.on_change()
 
+    @property
+    def auto_source(self) -> str | None:
+        return self.source if self.source and self.source != "manual" else None
+
     def watch(self) -> None:
-        from .detect import in_meeting
+        from .detect import active_platform
 
         while True:
             time.sleep(self.poll)
             try:
-                self._tick(in_meeting(self.window_titles))
+                self._tick(active_platform(self.window_titles, self.platforms, self.auto_source))
             except Exception:
-                log.exception("Проверка окна Zoom не удалась")
+                log.exception("Проверка встречи не удалась")
 
-    def _tick(self, active: bool) -> None:
+    def _tick(self, found: str | None) -> None:
         if self.busy:
             return
         now = time.time()
+        active = found == self.auto_source if self.auto_source else found is not None
         if active:
             self.last_seen = now
         if not self.is_recording:
@@ -216,11 +225,11 @@ class Recording:
                 self.hits = 0
                 return
             self.hits = self.hits + 1 if active else 0
-            if self.hits >= self.start_after:
+            if self.hits >= self.start_after and found:
                 self.hits = 0
-                self.start("zoom")
-        elif self.source == "zoom" and now - self.last_seen > self.stop_grace:
-            self.stop("окно встречи закрыто")
+                self.start(found)
+        elif self.auto_source and now - self.last_seen > self.stop_grace:
+            self.stop("встреча закончилась")
 
     def toggle_manual(self) -> None:
         if self.is_recording:
@@ -232,7 +241,7 @@ class Recording:
         """Без этого автозапись через пару проверок начала бы новую запись той же встречи."""
         if not self.is_recording:
             return
-        if self.source == "zoom" or time.time() - self.last_seen <= self.stop_grace:
+        if self.auto_source or time.time() - self.last_seen <= self.stop_grace:
             self.skip_meeting = True
         self.stop(reason)
 
@@ -260,6 +269,8 @@ class Recording:
             log.info("Запись началась (%s): %s", source, folder.name)
             self.notify_backend()
             self.on_change()
+            if self.calendar:
+                threading.Thread(target=self._send_calendar, args=(folder,), daemon=True).start()
         finally:
             self.busy = False
 
@@ -275,7 +286,7 @@ class Recording:
             self.recorder = self.source = self.since = None
             length = time.time() - started
             # Случайно открытое окно Zoom на пару секунд — не встреча.
-            too_short = length < self.min_duration if src == "zoom" else length < 3
+            too_short = length < self.min_duration if src != "manual" else length < 3
             if too_short:
                 import shutil
 
@@ -305,10 +316,65 @@ class Recording:
     def status_text(self) -> str:
         if self.is_recording:
             mins = int((time.time() - (self.since or time.time())) / 60)
-            return ("Идёт запись встречи Zoom" if self.source == "zoom" else "Идёт запись") + f" · {mins} мин"
+            what = PLATFORM_TITLES.get(self.source or "")
+            return (f"Идёт запись встречи {what}" if what else "Идёт запись") + f" · {mins} мин"
         if self.skip_meeting:
             return "Запись остановлена — эту встречу больше не записываю"
-        return "Жду встречу в Zoom" if self.auto_record else "Автозапись выключена"
+        return "Жду начала встречи" if self.auto_record else "Автозапись выключена"
+
+    def _send_calendar(self, folder: Path) -> None:
+        ev = outlook_current_event()
+        if ev:
+            self.backend.post("calendar", {"folder": str(folder), **ev})
+
+
+PLATFORM_TITLES = {"zoom": "Zoom", "teams": "Teams", "telemost": "Телемоста", "meet": "в браузере"}
+
+# Текущее событие календаря Outlook: только из уже запущенного Outlook (сами его не открываем).
+_OUTLOOK_PS = r"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+try { $o = [Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application') } catch { exit 0 }
+$items = $o.GetNamespace('MAPI').GetDefaultFolder(9).Items
+$items.IncludeRecurrences = $true
+$items.Sort('[Start]')
+$now = Get-Date
+$f = "[Start] <= '" + $now.AddMinutes(10).ToString('g') + "' AND [End] >= '" + $now.ToString('g') + "'"
+$best = $null
+foreach ($it in $items.Restrict($f)) {
+  if ($it.AllDayEvent) { continue }
+  if ($best -eq $null -or $it.Recipients.Count -gt $best.Recipients.Count) { $best = $it }
+}
+if ($best -eq $null) { exit 0 }
+$people = @()
+foreach ($r in $best.Recipients) {
+  $mail = ''
+  try { $mail = $r.AddressEntry.GetExchangeUser().PrimarySmtpAddress } catch { }
+  if (-not $mail -and $r.Address -like '*@*') { $mail = $r.Address }
+  $people += @{ name = $r.Name; email = $mail }
+}
+@{ title = $best.Subject; attendees = $people } | ConvertTo-Json -Depth 4 -Compress
+"""
+
+
+def outlook_current_event() -> dict | None:
+    """{title, attendees: [{name, email}]} идущей встречи из Outlook или None."""
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _OUTLOOK_PS],
+                           capture_output=True, timeout=30, creationflags=osutil.CREATE_NO_WINDOW)
+        out = r.stdout.decode("utf-8", "replace").strip()
+        if not out:
+            return None
+        data = json.loads(out)
+        people = data.get("attendees") or []
+        if isinstance(people, dict):  # ConvertTo-Json превращает массив из одного элемента в объект
+            people = [people]
+        me = os.environ.get("USERNAME", "").lower()
+        people = [p for p in people if isinstance(p, dict) and (p.get("name") or "").lower() != me]
+        return {"title": str(data.get("title") or ""), "attendees": people}
+    except Exception as e:
+        log.info("Календарь Outlook недоступен: %s", e)
+        return None
 
 
 # ---------- автозапуск и ярлык ----------
@@ -449,7 +515,7 @@ class App:
             ps.MenuItem(lambda _: "Остановить запись" if r.is_recording else "Записать сейчас",
                         lambda *_: threading.Thread(target=r.toggle_manual, daemon=True).start()),
             ps.Menu.SEPARATOR,
-            ps.MenuItem("Записывать встречи Zoom автоматически", toggle_auto, checked=lambda _: r.auto_record),
+            ps.MenuItem("Записывать встречи автоматически", toggle_auto, checked=lambda _: r.auto_record),
             ps.MenuItem("Запускать при входе в Windows", toggle_login, checked=lambda _: autostart_enabled()),
             ps.Menu.SEPARATOR,
             ps.MenuItem("Настройки…", lambda *_: self.show_window("settings")),

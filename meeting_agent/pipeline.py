@@ -64,7 +64,8 @@ def process(path: Path, cfg: dict, template: str | None = None, retranscribe: bo
     else:
         raise ValueError(f"Не понимаю, что обрабатывать: {path}")
 
-    cfg["meeting"] = {"participants": participants.read(work), "fresh": retranscribe}
+    cfg["meeting"] = {"participants": participants.read(work), "fresh": retranscribe,
+                      "calendar": participants.read_calendar(work)}
     for track in (mic, others):
         if track and track.suffix.lower() == ".wav" and audio.repair_wav(track):
             log.info("Починил заголовок %s: запись не была закрыта", track.name)
@@ -341,6 +342,7 @@ def _write_note(path: Path, work: Path, segments: list[dict], total: float, star
             track = find_track(work, name)
             if track:
                 track.unlink()
+        (work / "playback.wav").unlink(missing_ok=True)
 
     log.info("Заметка готова: %s", out)
     notify(cfg, "Заметка по встрече готова", title)

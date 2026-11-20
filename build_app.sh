@@ -66,7 +66,7 @@ find "${RES}/app" -name "__pycache__" -type d -prune -exec rm -rf {} +
 
 say "Компилирую оболочку (Swift)"
 swiftc -O -target arm64-apple-macos13.0 app/main.swift app/Backend.swift app/Recording.swift \
-  app/WebWindow.swift recorder/Recorder.swift -o "${APP}/Contents/MacOS/Meeting Agent" 2>&1 \
+  app/Platforms.swift app/CalendarLookup.swift app/WebWindow.swift recorder/Recorder.swift -o "${APP}/Contents/MacOS/Meeting Agent" 2>&1 \
   | grep -v -E "installTap|DeprecatedDeclaration|^\s*[0-9]+ \||^\s*\||^\s*$|docs.swift.org" || true
 [[ -x "${APP}/Contents/MacOS/Meeting Agent" ]] || { echo "Ошибка компиляции"; exit 1; }
 
@@ -104,6 +104,10 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>Meeting Agent записывает ваш голос на встречах, чтобы составить протокол. Запись остаётся на этом Mac.</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Meeting Agent берёт из календаря название идущей встречи и список участников, чтобы точнее подписать собеседников. Календарь не меняется и никуда не отправляется.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>Meeting Agent берёт из календаря название идущей встречи и список участников, чтобы точнее подписать собеседников. Календарь не меняется и никуда не отправляется.</string>
   <key>NSScreenCaptureUsageDescription</key>
   <string>Meeting Agent записывает звук собеседников из Zoom и замечает начало встречи. Изображение экрана не сохраняется.</string>
   <key>NSAppTransportSecurity</key>

@@ -25,6 +25,9 @@ DEFAULTS = {
         "start_after_polls": 2,
         "stop_grace_seconds": 30,
         "min_duration_seconds": 60,
+        # Автозапись: zoom — по заголовку окна; teams, telemost — программа пишет микрофон;
+        # meet — браузер пишет микрофон и открыта вкладка звонка (Google Meet, Телемост, Teams в браузере).
+        "platforms": ["zoom", "teams", "telemost", "meet"],
     },
     "speakers": {"me": "Я", "others_prefix": "Собеседник"},
     "whisper": {"engine": "whisper-turbo", "model": "mlx-community/whisper-large-v3-turbo", "language": "ru",

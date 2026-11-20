@@ -17,7 +17,7 @@ import time
 import requests
 
 from . import config
-from .config import TEMPLATES_DIR, anthropic_key, openai_key
+from .config import anthropic_key, openai_key
 from .osutil import IS_WIN
 
 log = logging.getLogger(__name__)
@@ -42,11 +42,9 @@ CHUNK_PROMPT = """Это фрагмент {i} из {n} расшифровки в
 
 
 def template_text(name: str) -> str:
-    path = TEMPLATES_DIR / f"{name}.md"
-    if not path.exists():
-        available = ", ".join(p.stem for p in TEMPLATES_DIR.glob("*.md"))
-        raise ValueError(f"Нет шаблона «{name}». Доступны: {available}")
-    return path.read_text(encoding="utf-8")
+    from . import templates
+
+    return templates.text(name)
 
 
 _model = None  # (имя, модель, токенизатор): загружаем один раз на процесс
@@ -549,6 +547,10 @@ def summarize(transcript: str, cfg: dict, template: str) -> tuple[str, str]:
     if listed:
         source = (f"Участники встречи (список составлен вручную, кроме «Я»): {', '.join(listed)}. "
                   "Пиши их имена именно так.\n\n" + source)
+    cal = cfg.get("meeting", {}).get("calendar") or {}
+    if cal.get("title"):
+        source = (f"Название встречи в календаре: «{cal['title']}». Используй его как подсказку "
+                  "о теме, но заголовок пиши по содержанию разговора.\n\n" + source)
     log.info("Итоговое саммари…")
     return parse_title(chat(cfg, f"{instructions}\n\n{source}"))
 

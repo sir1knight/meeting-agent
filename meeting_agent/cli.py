@@ -130,8 +130,9 @@ def main() -> None:
             print(f"{owner!r:14} {name!r}")
 
     elif args.cmd == "templates":
-        for t in sorted(config.TEMPLATES_DIR.glob("*.md")):
-            mark = " (по умолчанию)" if t.stem == cfg["output"]["template"] else ""
-            print(t.stem + mark)
+        from .templates import list_all
+        for t in list_all():
+            mark = " (по умолчанию)" if t["id"] == cfg["output"]["template"] else ""
+            print(f"{t['id']:12} {t['title']}{' — свой' if t['custom'] else ''}{mark}")
 
     sys.exit(0)

@@ -76,6 +76,27 @@ def take_next(work: Path) -> list[str]:
     return names
 
 
+CALENDAR_FILE = "calendar.json"
+
+
+def save_calendar(work: Path, title: str, attendees: list[dict]) -> list[str]:
+    """Событие календаря, совпавшее с записью: название и участники. Участники становятся списком
+    встречи, если его не задали вручную. Возвращает итоговый список."""
+    names = clean([a.get("name") or (a.get("email") or "").split("@")[0] for a in attendees])
+    (work / CALENDAR_FILE).write_text(json.dumps({"title": title.strip()[:200], "attendees": attendees[:60]},
+                                                 ensure_ascii=False, indent=1), encoding="utf-8")
+    if names and not read(work):
+        write(work, names)
+    return read(work)
+
+
+def read_calendar(work: Path) -> dict:
+    try:
+        return json.loads((work / CALENDAR_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def of(cfg: dict) -> list[str]:
     """Список участников обрабатываемой встречи (pipeline кладёт его в cfg)."""
     return cfg.get("meeting", {}).get("participants", [])

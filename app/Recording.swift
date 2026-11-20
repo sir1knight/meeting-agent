@@ -1,12 +1,16 @@
-// Запись встреч внутри приложения: вручную (весь звук системы) или автоматически,
-// когда появляется окно встречи Zoom. Готовая запись уходит на обработку в сервер.
+// Запись встреч внутри приложения: вручную (весь звук системы) или автоматически, когда начинается
+// встреча в Zoom, Teams, Яндекс Телемосте или звонок в браузере (Platforms.swift). Готовая запись уходит
+// на обработку в сервер; участники и название берутся из календаря (CalendarLookup.swift), если включено.
 
 import AppKit
 import AVFoundation
 import CoreGraphics
 
 final class RecordingController {
-    enum Source: String { case manual, zoom }
+    enum Source: String {
+        case manual, zoom, teams, telemost, meet
+        var platform: MeetingPlatform? { MeetingPlatform(rawValue: rawValue) }
+    }
 
     private let backend: Backend
     private var recorder: MeetingRecorder?
@@ -16,6 +20,9 @@ final class RecordingController {
 
     // Настройки из сервера (меняются в окне приложения).
     private var autoRecord = true
+    private var autoPlatforms: Set<String> = Set(MeetingPlatform.allCases.map(\.rawValue))
+    private var calendarEnabled = false
+    let calendar = CalendarLookup()
     private var windowTitles = ["Zoom Meeting", "Zoom Webinar", "Конференция Zoom", "Вебинар Zoom"]
     private var zoomBundle = "us.zoom.xos"
     private var pollSeconds = 3.0
@@ -43,6 +50,8 @@ final class RecordingController {
         backend.get("settings") { [weak self] s in
             guard let self, let s else { then?(); return }
             self.autoRecord = s["auto_record"] as? Bool ?? true
+            if let p = s["auto_platforms"] as? [String] { self.autoPlatforms = Set(p) }
+            self.calendarEnabled = s["calendar_participants"] as? Bool ?? false
             if let t = s["window_titles"] as? [String], !t.isEmpty { self.windowTitles = t }
             if let dir = s["recordings_dir"] as? String { self.recordingsDir = URL(fileURLWithPath: dir) }
             if let z = s["zoom"] as? [String: Any] {
@@ -73,7 +82,7 @@ final class RecordingController {
     /// Остановка по кнопке. Без этого автозапись через пару проверок начала бы новую запись той же встречи.
     func stopByUser(reason: String) {
         guard isRecording else { return }
-        if source == .zoom || zoomMeetingVisible() {
+        if source != .manual || activePlatform() != nil {
             skipCurrentMeeting = true
         }
         stop(reason: reason)
@@ -90,7 +99,9 @@ final class RecordingController {
 
     private func tick() {
         guard !busy else { return }
-        let active = zoomMeetingVisible()
+        let current = isRecording ? source : nil
+        let found = activePlatform(recording: current == .manual ? nil : current)
+        let active = isRecording && source != .manual ? found?.rawValue == source?.rawValue : found != nil
         let now = Date()
         if active { lastSeen = now }
 
@@ -106,28 +117,43 @@ final class RecordingController {
             }
             guard autoRecord else { hits = 0; return }
             hits = active ? hits + 1 : 0
-            if hits >= startAfterPolls {
+            if hits >= startAfterPolls, let platform = found {
                 hits = 0
-                start(source: .zoom)
+                start(source: Source(rawValue: platform.rawValue) ?? .zoom)
             }
-        } else if source == .zoom, now.timeIntervalSince(lastSeen) > stopGrace {
-            stop(reason: "окно встречи закрыто")
+        } else if source != .manual, now.timeIntervalSince(lastSeen) > stopGrace {
+            stop(reason: "встреча закончилась")
         }
     }
 
-    private func zoomMeetingVisible() -> Bool {
-        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
-            return false
+    /// Какая встреча идёт сейчас. recording — платформа идущей автозаписи: для неё признаки мягче
+    /// (вкладку со звонком в браузере могли переключить — пока браузер пишет микрофон, встреча идёт).
+    private func activePlatform(recording current: Source? = nil) -> MeetingPlatform? {
+        let wins = Platforms.windows()
+        if autoPlatforms.contains("zoom"), zoomMeetingVisible(wins) { return .zoom }
+        let users = Platforms.micUsers()
+        func app(_ p: MeetingPlatform, bundles: [String], owners: [String]) -> Bool {
+            guard autoPlatforms.contains(p.rawValue) else { return false }
+            if let users { return Platforms.uses(users, bundles) }
+            // macOS 13–14.1: кто пишет микрофон, не узнать — окно программы плюс работающий микрофон.
+            return Platforms.appWindow(wins, owners) && (current == Source(rawValue: p.rawValue) || Platforms.micRunningSomewhere())
         }
+        if app(.teams, bundles: Platforms.teamsBundles, owners: ["microsoft teams", "teams"]) { return .teams }
+        if app(.telemost, bundles: Platforms.telemostBundles, owners: ["телемост", "telemost"]) { return .telemost }
+        if autoPlatforms.contains("meet") {
+            let browserMic = users.map { Platforms.uses($0, Platforms.browserBundles) } ?? Platforms.micRunningSomewhere()
+            if browserMic && (current == .meet || Platforms.browserCallWindow(wins)) { return .meet }
+        }
+        return nil
+    }
+
+    private func zoomMeetingVisible(_ wins: [(owner: String, name: String)]) -> Bool {
         let wanted = windowTitles.map { $0.lowercased() }
         var zoomWindows = 0, named = 0
-        for w in list {
-            let owner = (w[kCGWindowOwnerName as String] as? String ?? "").lowercased()
-            guard owner.contains("zoom") else { continue }
+        for w in wins where w.owner.contains("zoom") {
             zoomWindows += 1
-            let name = (w[kCGWindowName as String] as? String ?? "").lowercased()
-            if !name.isEmpty { named += 1 }
-            if !name.isEmpty, wanted.contains(where: { name.contains($0) }) { return true }
+            if !w.name.isEmpty { named += 1 }
+            if !w.name.isEmpty, wanted.contains(where: { w.name.contains($0) }) { return true }
         }
         // Без разрешения «Запись экрана» macOS не отдаёт заголовки окон чужих приложений.
         let hidden = zoomWindows > 0 && named == 0
@@ -154,6 +180,8 @@ final class RecordingController {
             let fmt = DateFormatter()
             fmt.dateFormat = "yyyy-MM-dd_HH-mm-ss"
             let folder = self.recordingsDir.appendingPathComponent(fmt.string(from: Date()), isDirectory: true)
+            // Zoom — только его звук; остальные (Teams, Телемост, браузер) — весь звук системы:
+            // их звук играют вспомогательные процессы, и по одной программе его можно не поймать.
             let target = source == .zoom ? self.zoomBundle : "all"
             let rec = MeetingRecorder(folder: folder, target: target)
             do {
@@ -169,6 +197,7 @@ final class RecordingController {
             self.lastSeen = Date()
             self.notifyBackend()
             self.onChange?()
+            self.sendCalendar(folder: folder)
         }
     }
 
@@ -185,7 +214,7 @@ final class RecordingController {
             self.busy = false
             let length = Date().timeIntervalSince(started)
             // Случайно открытое окно Zoom на пару секунд — не встреча.
-            let tooShort = src == .zoom ? length < self.minDuration : length < 3
+            let tooShort = src != .manual ? length < self.minDuration : length < 3
             if tooShort {
                 try? FileManager.default.removeItem(at: rec.folder)
             } else {
@@ -194,6 +223,21 @@ final class RecordingController {
             NSLog("Meeting Agent: запись остановлена (\(reason)), \(Int(length)) с")
             self.notifyBackend()
             self.onChange?()
+        }
+    }
+
+    /// Название и участники встречи из календаря — серверу (станут списком участников записи).
+    private func sendCalendar(folder: URL) {
+        guard calendarEnabled, calendar.authorized, let ev = calendar.currentEvent() else { return }
+        backend.post("calendar", ["folder": folder.path, "title": ev.title, "attendees": ev.attendees])
+    }
+
+    func requestCalendarAccess() {
+        calendar.requestAccess { [weak self] ok in
+            guard let self, !ok else { return }
+            Task { @MainActor in self.alert("Нет доступа к календарю",
+                       "Разрешите Meeting Agent доступ к календарям в Системных настройках → Конфиденциальность и безопасность → Календари.",
+                       settingsPane: "Privacy_Calendars") }
         }
     }
 
@@ -221,7 +265,7 @@ final class RecordingController {
         let text = error.localizedDescription
         NSLog("Meeting Agent: не удалось начать запись: \(text)")
         notifyBackend(error: text)
-        if source == .zoom, text.contains("не запущено") { return }  // Zoom закрылся — не беспокоим
+        if source != .manual, text.contains("не запущено") { return }  // программа встречи закрылась — не беспокоим
         let lower = text.lowercased()
         if lower.contains("permission") || lower.contains("разрешен") || lower.contains("denied")
             || lower.contains("declined") || lower.contains("tcc") || (error as NSError).code == -3801 {

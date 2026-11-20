@@ -219,22 +219,22 @@ def backend(cfg: dict) -> str:
     return b if b in BACKENDS else "local"
 
 
-def _llm(cfg: dict, user: str) -> str:
+def _llm(cfg: dict, user: str, system: str = SYSTEM) -> str:
     from .summarize import chat_claude, chat_claude_code, chat_gemini, chat_openai
 
     b = backend(cfg)
     if b == "claude-code":
-        return chat_claude_code(cfg, user, SYSTEM)
+        return chat_claude_code(cfg, user, system)
     if b == "claude":
-        return chat_claude(cfg, user, SYSTEM)
+        return chat_claude(cfg, user, system)
     if b == "gemini":
         # Для поиска — быстрая «flash», а не модель протоколов.
-        return chat_gemini(cfg, user, SYSTEM, cfg.get("ask", {}).get("gemini_model"))
+        return chat_gemini(cfg, user, system, cfg.get("ask", {}).get("gemini_model"))
     if b == "openai":
-        return chat_openai(cfg, user, SYSTEM)
+        return chat_openai(cfg, user, system)
     # Qwen — в отдельном процессе: сервер не держит 4,5 ГБ модели в памяти между вопросами.
     r = subprocess.run([sys.executable, "-m", "meeting_agent", "ask-llm"], input=json.dumps(
-        {"system": SYSTEM, "user": user}, ensure_ascii=False), capture_output=True, text=True,
+        {"system": system, "user": user}, ensure_ascii=False), capture_output=True, text=True,
         cwd=config.ROOT, timeout=900)
     if r.returncode != 0:
         err = (r.stderr.strip().splitlines() or ["неизвестная ошибка"])[-1]
@@ -264,3 +264,45 @@ def ask(question: str, history: list[dict], cfg: dict) -> dict:
                          "kind": c["kind"], "ts": c.get("ts"), "seconds": c.get("seconds"),
                          "section": c.get("section"), "speaker": c.get("speaker"),
                          "text": c["text"][:240]} for c in sources]}
+
+
+# ---------- чат по одной встрече ----------
+
+MEETING_SYSTEM = (
+    "Ты помощник по одной рабочей встрече пользователя. У тебя есть её протокол и расшифровка. "
+    "Пиши по-русски, по делу, без вступлений. Опирайся только на протокол и расшифровку; "
+    "чего в них нет — не выдумывай, так и скажи. «Я» в расшифровке — сам пользователь. "
+    "Имя со звёздочкой (Олег*) угадано по разговору, со знаком (?) — неуверенно узнано по голосу. "
+    "Расшифровка автоматическая, в ней бывают ошибки распознавания. Таблицы и списки оформляй в Markdown. "
+    "Письма пиши деловым стилем, от первого лица пользователя, без выдуманных имён, дат и сумм.")
+
+
+def _fit_transcript(transcript: str, question: str, budget: int) -> str:
+    """Расшифровка целиком, если влезает; иначе — реплики, ближе всего к вопросу, в исходном порядке."""
+    if len(transcript) <= budget:
+        return transcript
+    blocks = [b for b in transcript.split("\n\n") if b.strip()]
+    words = set(_tokens(question))
+    scored = sorted(range(len(blocks)), key=lambda i: -len(words & set(_tokens(blocks[i]))))
+    keep, size = set(), 0
+    for i in scored:
+        if size + len(blocks[i]) > budget:
+            continue
+        keep.add(i)
+        size += len(blocks[i]) + 2
+    return "\n\n".join(blocks[i] for i in sorted(keep)) + "\n\n(расшифровка сокращена: показаны реплики, ближе всего к вопросу)"
+
+
+def meeting_ask(title: str, date_str: str, summary: str, transcript: str, question: str,
+                history: list[dict], cfg: dict) -> dict:
+    question = question.strip()
+    if not question:
+        raise ValueError("Задайте вопрос")
+    local = backend(cfg) == "local"
+    budget = 20000 if local else 400000  # Qwen: ~8 тыс. токенов на расшифровку; облачным — целиком
+    past = "\n".join(f"Вопрос: {h['q']}\nОтвет: {h['a'][:1500]}" for h in history[-3:])
+    user = (f"Встреча: {title} ({date_str}).\n\n## Протокол\n{summary}\n\n## Расшифровка\n"
+            f"{_fit_transcript(transcript, question, budget)}\n\n"
+            + (f"Предыдущий разговор:\n{past}\n\n" if past else "")
+            + f"Сегодня {date.today():%d.%m.%Y}.\nЗадание: {question}")
+    return {"answer": _llm(cfg, user, MEETING_SYSTEM), "backend": backend(cfg)}

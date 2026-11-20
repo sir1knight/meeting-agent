@@ -1,4 +1,5 @@
-"""Определяет, идёт ли сейчас встреча в Zoom, по заголовкам его окон."""
+"""Определяет, идёт ли сейчас встреча: Zoom — по заголовкам его окон; на Windows ещё Teams, Яндекс Телемост
+и звонки в браузере — по тому, какая программа сейчас пишет микрофон (Windows отмечает это в реестре)."""
 
 import logging
 
@@ -10,7 +11,68 @@ _warned_no_titles = False
 
 def zoom_windows() -> list[tuple[str, str]]:
     """(владелец, заголовок) всех окон Zoom."""
-    return _windows_win() if IS_WIN else _windows_mac()
+    return _windows_win(lambda owner: "zoom" in owner) if IS_WIN else _windows_mac()
+
+
+BROWSERS = ("chrome.exe", "msedge.exe", "browser.exe", "firefox.exe", "opera.exe", "brave.exe", "vivaldi.exe")
+WEB_CALL_TITLES = ("meet.google.com", "google meet", "meet –", "meet -", "телемост", "telemost", "microsoft teams",
+                   "teams.microsoft", "jitsi", "jazz", "контур.толк", "webex")
+
+
+def mic_users_win() -> list[str]:
+    """Программы, которые сейчас пишут микрофон. Windows ведёт журнал доступа к микрофону
+    (Параметры → Конфиденциальность → Микрофон); у идущей записи LastUsedTimeStop = 0.
+    Имена — путь к exe (с «#» вместо «\\») или имя пакета Магазина, в нижнем регистре."""
+    import winreg
+
+    base = r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+    out: list[str] = []
+
+    def scan(path: str) -> None:
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, path)
+        except OSError:
+            return
+        with key:
+            i = 0
+            while True:
+                try:
+                    name = winreg.EnumKey(key, i)
+                except OSError:
+                    break
+                i += 1
+                if name == "NonPackaged":
+                    scan(path + "\\" + name)
+                    continue
+                try:
+                    with winreg.OpenKey(key, name) as sub:
+                        stop = winreg.QueryValueEx(sub, "LastUsedTimeStop")[0]
+                        start = winreg.QueryValueEx(sub, "LastUsedTimeStart")[0]
+                except OSError:
+                    continue
+                if stop == 0 and start > 0:
+                    out.append(name.lower())
+
+    scan(base)
+    return [u for u in out if "meeting agent" not in u]  # своя запись не считается
+
+
+def active_platform(titles: list[str], platforms: list[str], current: str | None = None) -> str | None:
+    """Какая встреча идёт: zoom | teams | telemost | meet | None. current — платформа идущей автозаписи:
+    для неё признак мягче (вкладку браузера могли переключить — пока браузер пишет микрофон, встреча идёт)."""
+    if "zoom" in platforms and in_meeting(titles):
+        return "zoom"
+    if not IS_WIN:
+        return None
+    users = mic_users_win()
+    if "teams" in platforms and any("msteams" in u or "teams.exe" in u for u in users):
+        return "teams"
+    if "telemost" in platforms and any("telemost" in u for u in users):
+        return "telemost"
+    if "meet" in platforms and any(u.endswith(BROWSERS) for u in users):
+        if current == "meet" or _windows_win(lambda o: o.endswith(BROWSERS), WEB_CALL_TITLES):
+            return "meet"
+    return None
 
 
 def _windows_mac() -> list[tuple[str, str]]:
@@ -25,8 +87,9 @@ def _windows_mac() -> list[tuple[str, str]]:
     return out
 
 
-def _windows_win() -> list[tuple[str, str]]:
-    """Видимые окна процессов Zoom (Zoom.exe). Свёрнутое окно встречи тоже считается видимым."""
+def _windows_win(owner_ok, title_words: tuple = ()) -> list[tuple[str, str]]:
+    """Видимые окна процессов, чьё имя exe (в нижнем регистре) подходит owner_ok; если заданы title_words —
+    только окна, в заголовке которых есть одно из слов. Свёрнутое окно встречи тоже считается видимым."""
     import ctypes
     from ctypes import wintypes
 
@@ -53,11 +116,12 @@ def _windows_win() -> list[tuple[str, str]]:
             pid = wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             owner = process_name(pid.value)
-            if "zoom" in owner.lower():
+            if owner_ok(owner.lower()):
                 n = user32.GetWindowTextLengthW(hwnd)
                 buf = ctypes.create_unicode_buffer(n + 1)
                 user32.GetWindowTextW(hwnd, buf, n + 1)
-                out.append((owner, buf.value))
+                if not title_words or any(w in buf.value.lower() for w in title_words):
+                    out.append((owner, buf.value))
         return True
 
     user32.EnumWindows(visit, 0)

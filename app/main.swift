@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case "startRecording": if !self.recording.isRecording { self.recording.toggleManual() }
             case "stopRecording": self.recording.stopByUser(reason: "остановлено в окне")
             case "reloadSettings": self.recording.reloadSettings()
+            case "calendarAccess": self.recording.requestCalendarAccess()
             default: break
             }
         }
@@ -84,12 +85,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func statusText() -> String {
         if recording.isRecording {
             let mins = Int(Date().timeIntervalSince(recording.since ?? Date()) / 60)
-            return (recording.source == .zoom ? "Идёт запись встречи Zoom" : "Идёт запись") + " · \(mins) мин"
+            let what = recording.source?.platform.map { "Идёт запись встречи \($0.title)" } ?? "Идёт запись"
+            return what + " · \(mins) мин"
         }
         if processing > 0 { return "Обработка встреч: \(processing)" }
         if recording.titlesHidden { return "Нет разрешения «Запись экрана» — встречи не определяются" }
         if recording.skipCurrentMeeting { return "Запись остановлена — эту встречу больше не записываю" }
-        return recording.autoRecordEnabled ? "Жду встречу в Zoom" : "Автозапись выключена"
+        return recording.autoRecordEnabled ? "Жду начала встречи" : "Автозапись выключена"
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -106,7 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("Открыть Meeting Agent", #selector(openWindow), "o"))
         menu.addItem(item(recording.isRecording ? "Остановить запись" : "Записать сейчас", #selector(toggleRecording), "r"))
         menu.addItem(.separator())
-        let auto = item("Записывать встречи Zoom автоматически", #selector(toggleAuto), "")
+        let auto = item("Записывать встречи автоматически", #selector(toggleAuto), "")
         auto.state = recording.autoRecordEnabled ? .on : .off
         menu.addItem(auto)
         let login = item("Запускать при входе в систему", #selector(toggleLogin), "")

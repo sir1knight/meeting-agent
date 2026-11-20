@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from . import config, models, osutil, participants, pipeline, voices
+from . import config, models, osutil, participants, pipeline, playback, voices
 from .summarize import claude_cli
 
 log = logging.getLogger(__name__)
@@ -154,6 +154,7 @@ def _note_info(path: Path, full: bool = False) -> dict:
         src = Path(info["source"]) if info["source"] else None
         info["has_audio"] = bool(src and src.is_dir()
                                  and (pipeline.find_track(src, "mic") or pipeline.find_track(src, "others")))
+        info["can_play"] = bool(src and src.is_dir() and playback.available(src))
         info["speakers"] = _meeting_speakers(src) if src and src.is_dir() else []
         info["segments"], info["protocol_stale"] = _meeting_segments(src) if src and src.is_dir() else ([], False)
         err = src / pipeline.PROTOCOL_ERROR if src and src.is_dir() else None
@@ -244,9 +245,9 @@ def _gemini_model(name):
 def get_settings(cfg: dict) -> dict:
     from . import ask as ask_mod
 
-    templates = []
-    for t in sorted(config.TEMPLATES_DIR.glob("*.md")):
-        templates.append({"id": t.stem, "title": TEMPLATE_TITLES.get(t.stem, t.stem)})
+    from . import templates as tpl_mod
+
+    templates = tpl_mod.list_all()
     return {
         "llm_backend": cfg["llm"].get("backend", "local"),
         "backends": BACKENDS,
@@ -274,6 +275,8 @@ def get_settings(cfg: dict) -> dict:
         "zoom": {k: cfg["zoom"][k] for k in ("bundle_id", "poll_seconds", "start_after_polls",
                                             "stop_grace_seconds", "min_duration_seconds")},
         "auto_record": cfg.get("app", {}).get("auto_record", True),
+        "auto_platforms": cfg["zoom"].get("platforms", ["zoom", "teams", "telemost", "meet"]),
+        "calendar_participants": bool(cfg.get("app", {}).get("calendar_participants", False)),
         "claude_code_path": claude_cli(),
         "claude_code_model": cfg["claude"].get("code_model", ""),
         "claude_model": cfg["claude"].get("model", "claude-opus-5-5"),
@@ -284,10 +287,6 @@ def get_settings(cfg: dict) -> dict:
         "recommended_applied": bool(cfg.get("app", {}).get("recommended_applied")),
         "recordings_dir": str(cfg["paths"]["recordings"]),
     }
-
-
-TEMPLATE_TITLES = {"meeting": "Рабочая встреча", "standup": "Стендап",
-                   "client": "Встреча с партнёром", "interview": "Custdev-интервью"}
 
 
 def save_settings(data: dict) -> None:
@@ -303,15 +302,19 @@ def save_settings(data: dict) -> None:
         put("ask", "backend", data["ask_backend"])
     if data.get("asr_engine") in models.ASR_ENGINES:
         put("whisper", "engine", data["asr_engine"])
-    if "template" in data and (config.TEMPLATES_DIR / f"{data['template']}.md").exists():
+    from . import templates as tpl_mod
+    if "template" in data and tpl_mod.path(str(data["template"])):
         put("output", "template", data["template"])
     if isinstance(data.get("glossary"), list):
         put("whisper", "glossary", [str(x).strip() for x in data["glossary"] if str(x).strip()][:200])
+    if isinstance(data.get("auto_platforms"), list):
+        put("zoom", "platforms", [p for p in ("zoom", "teams", "telemost", "meet") if p in data["auto_platforms"]])
     if isinstance(data.get("window_titles"), list):
         put("zoom", "window_titles", [str(x).strip() for x in data["window_titles"] if str(x).strip()])
     for key, (section, name) in {"keep_audio": ("output", "keep_audio"),
                                  "diarization_enabled": ("diarization", "enabled"),
                                  "auto_record": ("app", "auto_record"),
+                                 "calendar_participants": ("app", "calendar_participants"),
                                  "voices_enabled": ("voices", "enabled"),
                                  "names_guess": ("names", "guess"),
                                  "live_enabled": ("live", "enabled"),
@@ -461,6 +464,9 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "")
         if host not in (f"127.0.0.1:{self.state.port}", f"localhost:{self.state.port}"):
             return False  # защита от подмены DNS
+        if self.path.startswith("/api/audio?"):
+            # Плеер (<audio src>) не умеет слать заголовки — токен в адресе; сервер слушает только 127.0.0.1.
+            return parse_qs(urlparse(self.path).query).get("token", [""])[0] == self.state.token
         if self.path.startswith("/api/"):
             return self.headers.get("X-Token") == self.state.token
         return True
@@ -631,6 +637,49 @@ class Handler(BaseHTTPRequestHandler):
         voices.reassign(cfg, Path(info["source"]), int(data.get("index", -1)), str(data.get("to", "")), note)
         self._json(_note_info(note, full=True))
 
+    def api_get_audio(self, q):
+        """Звук встречи для плеера, с поддержкой Range (перемотка)."""
+        cfg = config.load()
+        info = _note_info(_note_path(cfg, q.get("id", "")))
+        src = Path(info["source"]) if info["source"] else None
+        if not src or not src.is_dir():
+            raise LookupError("Аудио этой встречи не сохранено")
+        f = playback.ensure(src)
+        size = f.stat().st_size
+        start, end = 0, size - 1
+        rng = self.headers.get("Range", "")
+        m = re.match(r"bytes=(\d*)-(\d*)", rng)
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:  # последние N байт
+                start = max(0, size - int(m.group(2)))
+            if start > end:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.end_headers()
+                return
+        self.send_response(206 if m else 200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if m:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        with open(f, "rb") as fh:
+            fh.seek(start)
+            left = end - start + 1
+            try:
+                while left > 0:
+                    chunk = fh.read(min(1 << 20, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # плеер перемотал и закрыл соединение
+
     def api_get_speaker_sample(self, q):
         cfg = config.load()
         info = _note_info(_note_path(cfg, q.get("id", "")))
@@ -682,6 +731,70 @@ class Handler(BaseHTTPRequestHandler):
         d = self._data()
         history = [h for h in d.get("history", []) if isinstance(h, dict) and h.get("q")][-3:]
         self._json(ask(str(d.get("question", "")), history, config.load()))
+
+    def api_post_export(self, q):
+        """Протокол (и по желанию расшифровка) в Word, PDF или Markdown — в папку «Загрузки»."""
+        from . import export
+        d = self._data()
+        cfg = config.load()
+        path = _note_path(cfg, str(d.get("id", "")))
+        info = _note_info(path, full=True)
+        fmt = d.get("format")
+        name = export.safe_name(f"{info['title']} ({info['date'][:10]})" if info["date"] else info["title"])
+        folder = export.downloads_dir()
+        sub = " · ".join(x for x in (info["date"], info["duration"],
+                                      f"Участники: {info['participants']}" if info["participants"] else "") if x)
+        if fmt == "md":
+            out = export.unique_path(folder, name, ".md")
+            out.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+        elif fmt == "docx":
+            md = info["summary"]
+            if d.get("transcript") and info["transcript"]:
+                md += "\n\n## Расшифровка\n\n" + info["transcript"]
+            out = export.to_docx(export.unique_path(folder, name, ".docx"), info["title"], sub, md)
+        elif fmt == "pdf":
+            html_text = export.print_html(info["title"], str(d.get("html", "")))
+            out = export.to_pdf(export.unique_path(folder, name, ".pdf"), html_text)
+            if out is None:  # нет Chrome/Edge — открываем страницу, печать в PDF вручную
+                out = export.unique_path(folder, name, ".html")
+                out.write_text(html_text.replace("</body>", "<script>print()</script></body>"), encoding="utf-8")
+                osutil.open_path(out)
+                return self._json({"path": str(out), "manual": True})
+        else:
+            raise ValueError("Неизвестный формат")
+        osutil.reveal(out)
+        self._json({"path": str(out)})
+
+    # --- свои шаблоны протоколов ---
+    def api_get_template(self, q):
+        from . import templates
+        self._json(templates.get(q.get("id", "")))
+
+    def api_post_template(self, q):
+        from . import templates
+        d = self._data()
+        body = str(d.get("text", ""))
+        if d.get("points"):  # создание из списка пунктов / чек-листа
+            body = templates.from_points(str(d.get("title", "")), str(d["points"]), str(d.get("notes", "")))
+        self._json(templates.save(d.get("id") or None, str(d.get("title", "")), body))
+
+    def api_delete_template(self, q):
+        from . import templates
+        cfg = config.load()
+        name = q.get("id", "")
+        templates.delete(name)
+        if cfg["output"].get("template") == name and not templates.path(name):
+            save_settings({"template": "meeting"})
+        self._json({"ok": True})
+
+    def api_post_meeting_ask(self, q):
+        from .ask import meeting_ask
+        d = self._data()
+        cfg = config.load()
+        info = _note_info(_note_path(cfg, str(d.get("id", ""))), full=True)
+        history = [h for h in d.get("history", []) if isinstance(h, dict) and h.get("q")][-3:]
+        self._json(meeting_ask(info["title"], info["date"], info["summary"], info["transcript"],
+                               str(d.get("question", "")), history, cfg))
 
     def api_get_settings(self, q):
         self._json(get_settings(config.load()))
@@ -776,6 +889,18 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError("У этой встречи нет исходной записи")
             saved = participants.write(Path(info["source"]), names)
         self._json({"names": saved})
+
+    def api_post_calendar(self, q):
+        """От оболочки: событие календаря для идущей записи {folder, title, attendees: [{name, email}]}."""
+        d = self._data()
+        folder = Path(str(d.get("folder", "")))
+        rec_dir = config.load()["paths"]["recordings"].resolve()
+        if not folder.is_dir() or folder.resolve().parent != rec_dir:
+            raise ValueError("Неизвестная папка записи")
+        attendees = [a for a in d.get("attendees", []) if isinstance(a, dict)]
+        names = participants.save_calendar(folder, str(d.get("title", "")), attendees)
+        log.info("Календарь: «%s», участников: %d", d.get("title", ""), len(names))
+        self._json({"names": names})
 
     def api_post_process(self, q):
         folder = Path(self._data().get("folder", ""))

@@ -49,15 +49,21 @@
           <div class="tabs" role="tablist">
             <button class="tab active" data-tab="summary" role="tab">Протокол</button>
             <button class="tab" data-tab="transcript" role="tab">Расшифровка</button>
+            <button class="tab" data-tab="chat" role="tab" title="Вопросы и письма по этой встрече">Спросить</button>
           </div>
           <div class="actions">
             <button id="copyBtn" class="ghost" title="Скопировать протокол в буфер обмена">Копировать</button>
+            <button id="exportBtn" class="ghost" title="Сохранить в Word, PDF или Markdown">Скачать…</button>
             <button id="redoBtn" class="ghost">Пересоздать…</button>
             <button id="revealBtn" class="ghost" title="Показать файл заметки в Finder">В Finder</button>
             <button id="deleteBtn" class="ghost danger">Удалить</button>
           </div>
         </div>
       </header>
+      <div id="player" class="player" hidden>
+        <audio id="audio" controls preload="none"></audio>
+        <label class="check small"><input type="checkbox" id="follow" checked> Следить за текстом</label>
+      </div>
       <article id="mBody" class="md"></article>
     </section>
 
@@ -90,6 +96,50 @@
     <div class="dlg-actions">
       <button value="cancel" class="ghost">Отмена</button>
       <button value="ok" class="primary">Пересоздать</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="exportDialog">
+  <form method="dialog">
+    <h2>Скачать встречу</h2>
+    <div class="radios">
+      <label class="check"><input type="radio" name="exportFmt" value="docx" checked> Word (.docx)</label>
+      <label class="check"><input type="radio" name="exportFmt" value="pdf"> PDF</label>
+      <label class="check"><input type="radio" name="exportFmt" value="md"> Markdown (.md) — заметка как есть</label>
+    </div>
+    <label class="check" id="exportTrRow"><input type="checkbox" id="exportTr"> Вместе с расшифровкой</label>
+    <p class="muted small">Файл сохранится в папку «Загрузки».</p>
+    <div class="dlg-actions">
+      <button value="cancel" class="ghost">Отмена</button>
+      <button value="ok" class="primary">Скачать</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="templateDialog" class="wide">
+  <form method="dialog">
+    <h2 id="tplTitle">Свой шаблон протокола</h2>
+    <label>Название <input type="text" id="tplName" placeholder="Например: Оценка кандидата" maxlength="80"></label>
+    <div class="tabs" id="tplModes">
+      <button type="button" class="tab active" data-mode="points">Из пунктов или чек-листа</button>
+      <button type="button" class="tab" data-mode="text">Своя инструкция</button>
+    </div>
+    <div id="tplPointsBox">
+      <label>Пункты — каждый с новой строки. Можно вставить чек-лист или план документа
+        <textarea id="tplPoints" rows="7" placeholder="Опыт работы&#10;Мотивация&#10;Зарплатные ожидания&#10;Сильные и слабые стороны"></textarea></label>
+      <label>Дополнительные указания (по желанию)
+        <input type="text" id="tplNotes" placeholder="Например: в конце оцени кандидата по шкале 1–5"></label>
+      <p class="muted small">По каждому пункту модель запишет, что о нём прозвучало на встрече. Плюс разделы «Кратко», «Задачи», «Открытые вопросы».</p>
+    </div>
+    <div id="tplTextBox" hidden>
+      <label>Инструкция для модели
+        <textarea id="tplText" rows="12"></textarea></label>
+      <p class="muted small">Первой строкой ответа модель должна писать «TITLE: название» — из неё берётся заголовок заметки (если строки нет, приложение добавит это указание само).</p>
+    </div>
+    <div class="dlg-actions">
+      <button value="cancel" class="ghost">Отмена</button>
+      <button value="ok" class="primary">Сохранить</button>
     </div>
   </form>
 </dialog>

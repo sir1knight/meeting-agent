@@ -322,3 +322,21 @@ dialog .check { font-weight: 400; }
   #sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
   #main > section { padding: 20px 16px 40px; }
 }
+
+/* ---------- плеер, чат по встрече ---------- */
+.player { display: flex; align-items: center; gap: 12px; position: sticky; top: 0; z-index: 2;
+  background: var(--bg); padding: 8px 0; border-bottom: 1px solid var(--line); margin-bottom: 6px; }
+.player audio { flex: 1; height: 34px; min-width: 0; }
+.md .utt .ts.play { cursor: pointer; }
+.md .utt .ts.play:hover { color: var(--accent); text-decoration: underline; }
+.md .utt.playing { background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 6px; }
+.quick { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+.mchat .a { position: relative; }
+.mchat .a .copy-a { position: absolute; top: 6px; right: 8px; }
+.radios { display: grid; gap: 4px; margin: 8px 0 10px; }
+.tpl-list { display: grid; gap: 6px; margin: 8px 0; }
+.tpl-row { display: flex; align-items: center; gap: 8px; }
+.tpl-row .grow { flex: 1; }
+.mchat .q { margin: 18px 0 8px auto; max-width: 80%; width: fit-content; background: var(--active); padding: 8px 12px; border-radius: 12px; }
+.mchat .a { background: var(--card); border: 1px solid var(--line); padding: 10px 14px; border-radius: 12px; }
+.mchat .a.err { color: var(--rec); }
