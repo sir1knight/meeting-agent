@@ -822,6 +822,11 @@ class Handler(BaseHTTPRequestHandler):
         from . import updates
         self._json(updates.apply_code())  # только скачать: применится при перезапуске
 
+    def api_post_update_seen(self, q):
+        from . import updates
+        updates.mark_seen()
+        self._json({"ok": True})
+
     def api_post_update_reset(self, q):
         from . import updates
         updates.reset_code()

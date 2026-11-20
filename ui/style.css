@@ -359,3 +359,12 @@ dialog .check { font-weight: 400; }
 .upd-banner[hidden] { display: none; }
 .changes summary { cursor: pointer; color: var(--accent); margin: 2px 0; }
 .changes ul { margin: 2px 0 6px; padding-left: 18px; }
+
+/* окно «Обновление установлено» */
+#updDoneDialog { max-width: 520px; }
+#updDoneDialog h2 { text-align: center; margin-top: 4px; }
+.upd-done-icon { width: 48px; height: 48px; margin: 4px auto 0; border-radius: 50%; display: grid; place-items: center;
+  background: color-mix(in srgb, #34c759 18%, transparent); color: #34c759; font-size: 24px; font-weight: 700; }
+.upd-done-changes { max-height: 300px; overflow: auto; padding: 4px 2px; }
+.upd-done-changes ul { margin: 4px 0 10px; padding-left: 20px; }
+.upd-done-changes li { margin: 3px 0; }

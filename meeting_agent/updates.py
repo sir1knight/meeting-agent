@@ -199,6 +199,38 @@ def pending() -> str | None:
         return None
 
 
+SEEN = "seen-version.txt"  # версия, о которой пользователю уже сказали
+
+
+def just_updated() -> dict | None:
+    """Версия кода выросла с прошлого запуска — что показать в окне «Обновление установлено».
+    Первый запуск (ещё нечего сравнивать) и откат к старой версии — молча запоминаем."""
+    running = _manifest(config.ROOT)
+    cur = running.get("app", "1.0.0")
+    path = config.HOME / SEEN
+    try:
+        seen = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        seen = ""
+    if not seen and config.ROOT.resolve() != bundled_root().resolve():
+        seen = _manifest(bundled_root()).get("app", "")  # обновились с версии, которая ещё не вела учёт
+    if seen == cur:
+        return None
+    if not seen or _vt(cur) < _vt(seen):
+        mark_seen()
+        return None
+    return {"from": seen, "to": cur, "date": running.get("date", ""), "notes": running.get("notes", ""),
+            "changes": running.get("changes") or {}}
+
+
+def mark_seen() -> None:
+    try:
+        config.HOME.mkdir(parents=True, exist_ok=True)
+        (config.HOME / SEEN).write_text(_manifest(config.ROOT).get("app", "1.0.0"), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def status() -> dict:
     """Без обращения к сети: что установлено сейчас."""
     running = _manifest(config.ROOT)
@@ -208,7 +240,8 @@ def status() -> dict:
     return {"platform": platform(), "version": running.get("app", "1.0.0"),
             "bundled": bundled.get("app", "1.0.0"), "shell": shell_version(),
             "overlay": config.ROOT.resolve() != bundled_root().resolve(), "pending": p,
-            "packages_pending": packages_needed(root_next) if root_next else packages_needed(), "page": PAGE}
+            "packages_pending": packages_needed(root_next) if root_next else packages_needed(), "page": PAGE,
+            "just_updated": just_updated()}
 
 
 def check(max_age_hours: float = 0) -> dict:

@@ -623,6 +623,21 @@ function updWindowHtml() {
   return out.join("");
 }
 
+// После перезапуска с новой версией — окно «Обновление установлено» (один раз на версию).
+async function showUpdateDone() {
+  let u;
+  try { u = (await api("update")).just_updated; } catch (_) { return; }
+  if (!u) return;
+  const groups = Object.entries(u.changes || {});
+  $("updDoneBody").innerHTML = `<p>Meeting Agent обновлён: <b>${esc(u.from)} → ${esc(u.to)}</b>${u.date ? ` <span class="muted">(${esc(u.date)})</span>` : ""}.</p>
+    ${groups.length ? `<div class="upd-done-changes">${groups.map(([g, items]) =>
+      `<div class="small"><b>${esc(g)}</b><ul>${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul></div>`).join("")}</div>`
+      : (u.notes ? `<p class="muted">${esc(u.notes)}</p>` : "")}`;
+  const d = $("updDoneDialog");
+  d.addEventListener("close", () => api("update/seen", { method: "POST", body: {} }).catch(() => {}), { once: true });
+  d.showModal();
+}
+
 // «Что нового» версии с GitVerse/GitLab (раздел CHANGELOG.md, перенесённый в version.json).
 function changesHtml(u) {
   const groups = Object.entries(u.changes || {});
@@ -2140,5 +2155,6 @@ window.agentEvent = (name) => {
   show("meeting");
   if (S.meetings.length) openMeeting(S.meetings[0].id);
   pollStatus();
+  showUpdateDone();
   setTimeout(autoCheckUpdates, 4000);  // тихая проверка обновлений (GitVerse/GitLab — не чаще раза в сутки)
 })();
