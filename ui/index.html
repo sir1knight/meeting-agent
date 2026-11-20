@@ -25,11 +25,12 @@
     <input id="search" type="search" placeholder="Найти или спросить о встречах…" title="Enter — задать вопрос по всем встречам">
     <div id="jobs"></div>
     <nav id="list" aria-label="Список встреч"></nav>
+    <button id="updatesBtn" class="upd-banner" type="button" hidden title="Обновления и компоненты">
+      Доступны обновления <span id="updBadge" class="upd-badge"></span></button>
     <div class="side-foot">
       <button id="importBtn" class="ghost" title="Импортировать аудиофайл">＋ Импорт</button>
       <button id="voicesBtn" class="ghost" title="Слепки голоса собеседников">Голоса</button>
       <button id="settingsBtn" class="ghost">Настройки</button>
-      <button id="updatesBtn" class="ghost" title="Обновления и компоненты">Обновления <span id="updBadge" class="upd-badge" hidden></span></button>
       <input id="fileInput" type="file" accept="audio/*,video/mp4,video/quicktime,.m4a,.mp3,.wav,.ogg,.opus,.webm,.flac" hidden>
     </div>
   </aside>

@@ -348,3 +348,9 @@ dialog .check { font-weight: 400; }
 .upd-actions { flex-wrap: wrap; position: sticky; bottom: 0; background: var(--card, var(--bg)); padding-top: 10px; }
 .upd-badge { display: inline-block; min-width: 16px; padding: 0 5px; border-radius: 8px; background: var(--rec); color: #fff;
   font-size: 11px; font-weight: 700; line-height: 16px; text-align: center; margin-left: 2px; }
+.upd-banner { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: calc(100% - 16px);
+  margin: 6px 8px 0; padding: 7px 10px; border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 9px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--fg, inherit);
+  font-size: 13px; text-align: left; cursor: pointer; }
+.upd-banner:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.upd-banner[hidden] { display: none; }

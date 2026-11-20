@@ -531,9 +531,13 @@ function updCount() {
   return n;
 }
 
+// Строка «Доступны обновления» над кнопками боковой панели — только когда есть что обновить
+// (или скачанное ждёт перезапуска). Без обновлений окно открывается из Настроек.
 function paintUpdBadge() {
   UPD.count = updCount();
-  $("updBadge").hidden = !UPD.count;
+  const u = UPD.info || {};
+  $("updatesBtn").hidden = !UPD.count;
+  $("updatesBtn").firstChild.textContent = u.pending ? "Обновление ждёт перезапуска " : "Доступны обновления ";
   $("updBadge").textContent = UPD.count;
 }
 
