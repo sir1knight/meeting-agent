@@ -239,9 +239,11 @@ def apply_code() -> dict:
     archive = base / ".code.zip"
     first = m.get("_source") if m.get("_source") in SOURCES else next(iter(SOURCES))
     errors: dict[str, Exception] = {}
-    for name in [first] + [n for n in SOURCES if n != first]:
+    order = [first] + [n for n in SOURCES if n != first]
+    # Сначала по одной попытке на каждой площадке (занята одна — сразу берём другую), ждём — только если отказали обе.
+    for quick, name in [(True, n) for n in order] + [(False, n) for n in order]:
         try:
-            archive.write_bytes(_get(SOURCES[name]["archive"], name=name).content)
+            archive.write_bytes(_get(SOURCES[name]["archive"], quick=quick, name=name).content)
             log.info("Код версии %s скачан с %s", version, name)
             break
         except Exception as e:  # noqa: BLE001
