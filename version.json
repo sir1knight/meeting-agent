@@ -25,5 +25,13 @@
   "shell_latest": {
     "mac": 3,
     "windows": 2
+  },
+  "shell_download": {
+    "mac": {
+      "version": 3,
+      "url": "https://gitlab.com/api/v4/projects/sir1knight%2FMeeting_agent/packages/generic/meeting-agent/1.5.0/Meeting-Agent-Mac.zip",
+      "sha256": "16e4794695f15f3888f61920fb157911ede7e909d611e5c6a7ed87139c2028d7",
+      "size": 1113520
+    }
   }
 }
