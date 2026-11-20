@@ -118,6 +118,7 @@ SOUT="build/windows-setup/Meeting Agent"
 rm -rf "build/windows-setup"
 mkdir -p "build/windows-setup"
 cp -cR "${OUT}" "build/windows-setup/" 2>/dev/null || cp -R "${OUT}" "build/windows-setup/"
+rm -rf "${SOUT}/tools"   # uv (~15 МБ) скачается при первом запуске с PyPI: GitVerse не принимает файлы больше ~12 МБ
 SP="${SOUT}/python/Lib/site-packages"
 find "${SP}" -mindepth 1 -maxdepth 1 ! -name "README.txt" -exec rm -rf {} +
 rm -f "${SP}/.meeting-agent-lock"
