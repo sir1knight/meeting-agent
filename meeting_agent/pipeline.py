@@ -272,7 +272,7 @@ def make_chapters(work: Path, segments: list[dict], cfg: dict, summary: str = ""
 
 def _write_note(path: Path, work: Path, segments: list[dict], total: float, started: datetime,
                 cfg: dict, template: str) -> Path:
-    (work / "transcript.md").write_text(merge.to_markdown(segments), encoding="utf-8")
+    osutil.atomic_write_text((work / "transcript.md"), merge.to_markdown(segments))
     if not segments:
         log.warning("Речь не распознана: %s", path)
         notify(cfg, "Meeting Agent", "В записи не найдено речи")
@@ -285,7 +285,7 @@ def _write_note(path: Path, work: Path, segments: list[dict], total: float, star
         from . import names
         if names.guess(work, segments, cfg):
             segments = voices.apply_names(segments, work)
-            (work / "transcript.md").write_text(merge.to_markdown(segments), encoding="utf-8")
+            osutil.atomic_write_text((work / "transcript.md"), merge.to_markdown(segments))
 
     free_memory()
     stage("summarize")
@@ -340,7 +340,7 @@ def _write_note(path: Path, work: Path, segments: list[dict], total: float, star
     while out.exists() and out != previous:  # две разные встречи с одинаковым названием
         out = notes_dir / f"{started:%Y-%m-%d %H-%M} — {safe_name(title)} ({n}).md"
         n += 1
-    out.write_text(note, encoding="utf-8")
+    osutil.atomic_write_text(out, note)
     sp_data = voices.read_speakers(work)
     if sp_data.get("protocol_stale"):  # протокол снова соответствует разметке собеседников
         sp_data.pop("protocol_stale")
@@ -400,6 +400,17 @@ def pending(cfg: dict) -> list[Path]:
     root: Path = cfg["paths"]["recordings"]
     if not root.exists():
         return []
-    return sorted(d for d in root.iterdir()
-                  if d.is_dir() and not (d / DONE_MARK).exists()
-                  and (find_track(d, "mic") or find_track(d, "others")))
+    from . import recovery
+
+    out = []
+    for d in sorted(root.iterdir()):
+        if not d.is_dir() or (d / DONE_MARK).exists():
+            continue
+        if recovery.is_live(d):
+            continue  # запись идёт прямо сейчас (сервер перезапустился посреди встречи) — не трогаем
+        if recovery.is_interrupted(d):
+            if recovery.recover(d):
+                notify(cfg, "Meeting Agent", f"Восстановлена запись {d.name}, прерванная сбоем — обрабатываю")
+        if find_track(d, "mic") or find_track(d, "others"):
+            out.append(d)
+    return out

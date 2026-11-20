@@ -154,6 +154,9 @@ class MeetingRecorder:
 
         _com_init()  # запись начинают из потока слежения за Zoom или из меню трея (поток живёт долго)
         self.folder.mkdir(parents=True, exist_ok=True)
+        from .recovery import write_lock
+
+        write_lock(self.folder, "all")  # если приложение упадёт, сервер восстановит запись при запуске
         try:
             speaker = sc.default_speaker()
         except Exception as e:
@@ -204,4 +207,8 @@ class MeetingRecorder:
         for t in self.tracks:
             if t.first_time:
                 meta[f"{t.track}_start"] = t.first_time
-        (self.folder / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        from . import osutil
+        from .recovery import remove_lock
+
+        osutil.atomic_write_text(self.folder / "meta.json", json.dumps(meta, indent=2))
+        remove_lock(self.folder)

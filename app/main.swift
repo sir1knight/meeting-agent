@@ -27,9 +27,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.updateIcon()
             self?.window.event("status")
         }
-        window.onCommand = { [weak self] cmd, _ in
+        window.onCommand = { [weak self] cmd, args in
             guard let self else { return }
             switch cmd {
+            case "openPrivacy":
+                // Кнопка «Открыть настройки» в окне приложения: нужный раздел «Конфиденциальность и безопасность».
+                let pane = (args["pane"] as? String) ?? "Privacy_Microphone"
+                if pane.hasPrefix("Privacy_"), let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
+                    NSWorkspace.shared.open(url)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 20) { self.recording.reportPermissions() }
             case "startRecording": if !self.recording.isRecording { self.recording.toggleManual() }
             case "stopRecording": self.recording.stopByUser(reason: "остановлено в окне")
             case "reloadSettings": self.recording.reloadSettings()

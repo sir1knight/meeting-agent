@@ -55,6 +55,7 @@ DEFAULTS = {
     },
     "names": {"guess": True},
     "live": {"enabled": True},
+    "recording": {"echo_cancel": True, "pill": True},
     "ask": {"backend": "", "gemini_model": "gemini-3.8-flash"},
     "llm": {
         "backend": "local",

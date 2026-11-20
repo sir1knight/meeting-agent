@@ -70,7 +70,7 @@ find "${RES}/app" -name "__pycache__" -type d -prune -exec rm -rf {} +
 
 say "Компилирую оболочку (Swift)"
 swiftc -O -target arm64-apple-macos13.0 app/main.swift app/Backend.swift app/Recording.swift \
-  app/Platforms.swift app/CalendarLookup.swift app/WebWindow.swift recorder/Recorder.swift -o "${APP}/Contents/MacOS/Meeting Agent" 2>&1 \
+  app/Platforms.swift app/CalendarLookup.swift app/WebWindow.swift app/RecordingPill.swift recorder/Recorder.swift -o "${APP}/Contents/MacOS/Meeting Agent" 2>&1 \
   | grep -v -E "installTap|DeprecatedDeclaration|^\s*[0-9]+ \||^\s*\||^\s*$|docs.swift.org" || true
 [[ -x "${APP}/Contents/MacOS/Meeting Agent" ]] || { echo "Ошибка компиляции"; exit 1; }
 

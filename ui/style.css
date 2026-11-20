@@ -435,3 +435,10 @@ dialog .check { font-weight: 400; }
 .tpl-past-list { margin: 8px 0; max-height: 140px; overflow: auto; }
 .warn-text { color: var(--warn); }
 #tplPastBox > * { margin-bottom: 8px; }
+
+/* предупреждение о записи и разрешения macOS */
+.rec-warn { flex-basis: 100%; font-size: 12px; color: var(--warn); margin-top: 4px; }
+.rec-banner { flex-wrap: wrap; }
+.perm-banner { margin: 0 14px 10px; padding: 8px 10px; border-radius: 10px; font-size: 12.5px;
+  background: color-mix(in srgb, var(--warn) 14%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); }
+.perm-row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; margin-top: 4px; }

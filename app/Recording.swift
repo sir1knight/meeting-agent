@@ -38,12 +38,39 @@ final class RecordingController {
     // Запись остановили вручную, а окно встречи ещё открыто: не начинать её снова до конца этой встречи.
     private(set) var skipCurrentMeeting = false
 
+    // Надёжность записи (как у mymeet): проверка дорожек, пауза автостопа после сна и смены устройства.
+    private var echoCancel = true
+    let pill = RecordingPill()
+    private var healthTimer: Timer?
+    private var holdStopUntil = Date.distantPast
+    private var micSilentFor = 0.0
+    private var micRestarts = 0
+    private var warning: String?
+    private var warnedAbout = Set<String>()
+    private var permTicks = 0
+
     var onChange: (() -> Void)?
     var isRecording: Bool { recorder != nil }
     var autoRecordEnabled: Bool { autoRecord }
 
     init(backend: Backend) {
         self.backend = backend
+        pill.onStop = { [weak self] in self?.stopByUser(reason: "остановлено на плашке") }
+        pill.onSkip = { [weak self] in self?.discardCurrent() }
+        // После сна: встреча могла продолжиться — минуту не останавливаем запись, дорожки перезапускаем.
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
+                                                          queue: .main) { [weak self] _ in
+            guard let self else { return }
+            self.holdStop(60)
+            guard let rec = self.recorder else { return }
+            rec.restartMic()
+            Task { try? await rec.restartOthers() }
+        }
+    }
+
+    private func holdStop(_ seconds: TimeInterval) {
+        holdStopUntil = max(holdStopUntil, Date().addingTimeInterval(seconds))
+        lastSeen = max(lastSeen, Date())
     }
 
     func reloadSettings(then: (() -> Void)? = nil) {
@@ -52,6 +79,9 @@ final class RecordingController {
             self.autoRecord = s["auto_record"] as? Bool ?? true
             if let p = s["auto_platforms"] as? [String] { self.autoPlatforms = Set(p) }
             self.calendarEnabled = s["calendar_participants"] as? Bool ?? false
+            self.echoCancel = s["echo_cancel"] as? Bool ?? true
+            self.pill.enabled = s["recording_pill"] as? Bool ?? true
+            if self.pill.enabled, let since = self.since, self.isRecording { self.pill.show(since: since, title: self.pillTitle()) }
             if let t = s["window_titles"] as? [String], !t.isEmpty { self.windowTitles = t }
             if let dir = s["recordings_dir"] as? String { self.recordingsDir = URL(fileURLWithPath: dir) }
             if let z = s["zoom"] as? [String: Any] {
@@ -62,6 +92,7 @@ final class RecordingController {
                 self.minDuration = (z["min_duration_seconds"] as? NSNumber)?.doubleValue ?? self.minDuration
             }
             self.startWatching()
+            self.reportPermissions()
             self.onChange?()
             then?()
         }
@@ -80,12 +111,12 @@ final class RecordingController {
     }
 
     /// Остановка по кнопке. Без этого автозапись через пару проверок начала бы новую запись той же встречи.
-    func stopByUser(reason: String) {
+    func stopByUser(reason: String, process: Bool = true) {
         guard isRecording else { return }
         if source != .manual || activePlatform() != nil {
             skipCurrentMeeting = true
         }
-        stop(reason: reason)
+        stop(reason: reason, process: process)
     }
 
     // MARK: - Слежение за Zoom
@@ -98,6 +129,8 @@ final class RecordingController {
     }
 
     private func tick() {
+        permTicks += 1
+        if permTicks * Int(pollSeconds) >= 60 { permTicks = 0; reportPermissions() }
         guard !busy else { return }
         let current = isRecording ? source : nil
         let found = activePlatform(recording: current == .manual ? nil : current)
@@ -121,7 +154,7 @@ final class RecordingController {
                 hits = 0
                 start(source: Source(rawValue: platform.rawValue) ?? .zoom)
             }
-        } else if source != .manual, now.timeIntervalSince(lastSeen) > stopGrace {
+        } else if source != .manual, now.timeIntervalSince(lastSeen) > stopGrace, now >= holdStopUntil {
             stop(reason: "встреча закончилась")
         }
     }
@@ -184,6 +217,8 @@ final class RecordingController {
             // их звук играют вспомогательные процессы, и по одной программе его можно не поймать.
             let target = source == .zoom ? self.zoomBundle : "all"
             let rec = MeetingRecorder(folder: folder, target: target)
+            rec.echoCancel = self.echoCancel
+            rec.onDeviceChange = { [weak self] in self?.holdStop(20) }  // сменили микрофон — это не конец встречи
             do {
                 try await rec.start()
             } catch {
@@ -198,12 +233,109 @@ final class RecordingController {
             self.notifyBackend()
             self.onChange?()
             self.sendCalendar(folder: folder)
+            self.pill.show(since: self.since ?? Date(), title: self.pillTitle())
+            self.startHealthChecks()
         }
     }
 
-    func stop(reason: String) {
+    private func pillTitle() -> String {
+        switch source {
+        case .zoom: return "Zoom"
+        case .teams: return "Teams"
+        case .telemost: return "Телемост"
+        case .meet: return "звонок в браузере"
+        default: return ""
+        }
+    }
+
+    // MARK: - Проверка записи во время встречи
+
+    private func startHealthChecks() {
+        micSilentFor = 0; micRestarts = 0; warning = nil; warnedAbout = []
+        healthTimer?.invalidate()
+        healthTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.checkHealth() }
+    }
+
+    private func checkHealth() {
+        guard let rec = recorder, !busy else { return }
+        let (mic, others) = rec.health()
+        let now = Date()
+        var problems: [String] = []
+        // Микрофон перестал присылать звук (устройство пропало) — перезапускаем на текущем.
+        if mic.stopped || (mic.lastBufferAt.map { now.timeIntervalSince($0) > 10 } ?? true) {
+            micRestarts += 1
+            rec.restartMic()
+            if micRestarts >= 2 { problems.append("Микрофон не отвечает — проверьте, подключён ли он") }
+        } else {
+            micRestarts = 0
+            micSilentFor = mic.peakSinceCheck == 0 ? micSilentFor + 15 : 0  // ровно 0 — выключен звук или нет доступа
+            if micSilentFor >= 45 {
+                problems.append("Микрофон не слышно — не выключен ли звук микрофона и тот ли вход выбран в macOS")
+            }
+        }
+        if others.stopped {
+            problems.append("Пропал звук собеседников — восстанавливаю")
+            Task { try? await rec.restartOthers() }
+        }
+        let text = problems.first
+        if text != warning {
+            warning = text
+            pill.setWarning(text)
+            notifyBackend()
+            if let text, !warnedAbout.contains(text) {
+                warnedAbout.insert(text)
+                Self.notify("Meeting Agent: проверьте запись", text)
+            }
+        }
+    }
+
+    static func notify(_ title: String, _ text: String) {
+        let esc = { (s: String) in s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        p.arguments = ["-e", "display notification \"\(esc(text))\" with title \"\(esc(title))\""]
+        try? p.run()
+    }
+
+    /// «✕» на плашке: остановить и не сохранять эту встречу (после подтверждения).
+    private func discardCurrent() {
+        guard let rec = recorder else { return }
+        let a = NSAlert()
+        a.messageText = "Не записывать эту встречу?"
+        a.informativeText = "Запись остановится и будет удалена, протокол не составится. Следующая встреча запишется как обычно."
+        a.addButton(withTitle: "Удалить запись")
+        a.addButton(withTitle: "Отмена")
+        NSApp.activate(ignoringOtherApps: true)
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        let folder = rec.folder
+        stopByUser(reason: "не записывать эту встречу", process: false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            try? FileManager.default.trashItem(at: folder, resultingItemURL: nil)
+        }
+    }
+
+    // MARK: - Разрешения macOS (окно приложения подсказывает, что включить)
+
+    func reportPermissions() {
+        let mic: String
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized: mic = "granted"
+        case .notDetermined: mic = "unknown"
+        default: mic = "denied"
+        }
+        var body: [String: Any] = ["mic": mic, "screen": CGPreflightScreenCaptureAccess() ? "granted" : "denied",
+                                   "titles_hidden": titlesHidden]
+        if calendarEnabled { body["calendar"] = calendar.authorized ? "granted" : "denied" }
+        backend.post("permissions", body)
+    }
+
+    func stop(reason: String, process: Bool = true) {
         guard let rec = recorder, !busy else { return }
         busy = true
+        healthTimer?.invalidate()
+        healthTimer = nil
+        pill.hide()
+        warning = nil
         let started = since ?? Date()
         let src = source
         Task { @MainActor in
@@ -217,7 +349,7 @@ final class RecordingController {
             let tooShort = src != .manual ? length < self.minDuration : length < 3
             if tooShort {
                 try? FileManager.default.removeItem(at: rec.folder)
-            } else {
+            } else if process {
                 self.backend.post("process", ["folder": rec.folder.path])
             }
             NSLog("Meeting Agent: запись остановлена (\(reason)), \(Int(length)) с")
@@ -248,6 +380,8 @@ final class RecordingController {
         if let source { body["source"] = source.rawValue }
         if let folder = recorder?.folder { body["folder"] = folder.path }
         if let error { body["error"] = error }
+        if let warning, isRecording { body["warning"] = warning }
+        if let rec = recorder { body["echo_cancel"] = rec.echoCancelActive }
         if skipCurrentMeeting && !isRecording { body["skip_meeting"] = true }
         backend.post("recording", body)
     }

@@ -8,7 +8,7 @@ import logging
 import re
 from pathlib import Path
 
-from . import merge
+from . import merge, osutil
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ def build(segments: list[dict], chat, budget: int = 12000, summary: str = "") ->
 
 
 def save(work: Path, data: dict) -> None:
-    (work / FILE).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    osutil.atomic_write_text((work / FILE), json.dumps(data, ensure_ascii=False))
 
 
 def read(work: Path | None) -> dict:

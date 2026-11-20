@@ -9,6 +9,8 @@ import time
 import uuid
 from pathlib import Path
 
+from . import osutil
+
 DIR = "versions"
 
 SYSTEM = (
@@ -64,7 +66,7 @@ def create(work: Path, title: str, date_str: str, summary: str, transcript: str,
     v = {"id": uuid.uuid4().hex[:8], "request": request, "label": label[:32] + ("…" if len(label) > 32 else ""), "title": name if name != "Встреча" else request[:40],
          "text": text, "created": time.time()}
     _dir(work).mkdir(exist_ok=True)
-    (_dir(work) / f"{v['id']}.json").write_text(json.dumps(v, ensure_ascii=False), encoding="utf-8")
+    osutil.atomic_write_text(_dir(work) / f"{v['id']}.json", json.dumps(v, ensure_ascii=False))
     return v
 
 

@@ -300,6 +300,8 @@ def get_settings(cfg: dict) -> dict:
         "platform": "windows" if osutil.IS_WIN else "mac",
         "recommended_applied": bool(cfg.get("app", {}).get("recommended_applied")),
         "recordings_dir": str(cfg["paths"]["recordings"]),
+        "echo_cancel": cfg.get("recording", {}).get("echo_cancel", True),
+        "recording_pill": cfg.get("recording", {}).get("pill", True),
     }
 
 
@@ -332,7 +334,9 @@ def save_settings(data: dict) -> None:
                                  "voices_enabled": ("voices", "enabled"),
                                  "names_guess": ("names", "guess"),
                                  "live_enabled": ("live", "enabled"),
-                                 "recommended_applied": ("app", "recommended_applied")}.items():
+                                 "recommended_applied": ("app", "recommended_applied"),
+                                 "echo_cancel": ("recording", "echo_cancel"),
+                                 "recording_pill": ("recording", "pill")}.items():
         if isinstance(data.get(key), bool):
             put(section, name, data[key])
     if isinstance(data.get("claude_code_model"), str):
@@ -437,6 +441,7 @@ class State:
         self.jobs = Jobs()
         self.downloads = models.Downloader()
         self.recording: dict = {"state": "idle"}
+        self.permissions: dict = {}  # разрешения macOS от оболочки
         self.live = Live()
         self.jobs.before_run = self.live.wait
 
@@ -536,6 +541,7 @@ class Handler(BaseHTTPRequestHandler):
             "setup_needed": any(m["required"] and m["status"] != "ready"
                                 for name, m in downloads.items() if name != "diarization"),
             "llm_backend": cfg["llm"].get("backend", "local"),
+            "permissions": self.state.permissions,
         })
 
     def api_get_meetings(self, q):
@@ -981,13 +987,20 @@ class Handler(BaseHTTPRequestHandler):
     def api_post_recording(self, q):
         data = self._data()
         prev = self.state.recording
-        self.state.recording = {k: data.get(k) for k in ("state", "folder", "since", "source", "error", "skip_meeting")}
+        self.state.recording = {k: data.get(k) for k in ("state", "folder", "since", "source", "error", "skip_meeting",
+                                                         "warning", "echo_cancel")}
         folder = data.get("folder")
         if data.get("state") == "recording" and folder and folder != prev.get("folder"):
             participants.take_next(Path(folder))  # список «следующей встречи» достаётся этой записи
             self.state.live.start(folder)
         if data.get("state") != "recording" and prev.get("folder"):
             self.state.live.stop(prev["folder"])
+        self._json({"ok": True})
+
+    def api_post_permissions(self, q):
+        """Разрешения macOS от оболочки: микрофон, запись экрана и звука, календарь."""
+        d = self._data()
+        self.state.permissions = {k: d.get(k) for k in ("mic", "screen", "calendar", "titles_hidden") if k in d}
         self._json({"ok": True})
 
     # --- списки участников ---

@@ -1418,7 +1418,27 @@ function renderRecording() {
     const PLAT = { zoom: "Zoom", teams: "Teams", telemost: "Телемоста", meet: "в браузере" };
     $("recText").textContent = `${PLAT[rec.source] ? "Запись встречи " + PLAT[rec.source] : "Идёт запись"} · ${t}`;
   }
+  $("recWarn").hidden = !(on && rec.warning);
+  $("recWarn").textContent = on && rec.warning ? "⚠ " + rec.warning : "";
+  renderPermissions();
 }
+
+// Разрешения macOS: чего не хватает — и кнопка в нужный раздел Системных настроек.
+function renderPermissions() {
+  const p = (S.status && S.status.permissions) || {};
+  const miss = [];
+  if (p.mic === "denied") miss.push(["Микрофон", "без него не записывается ваш голос", "Privacy_Microphone"]);
+  if (p.screen === "denied") miss.push(["Запись экрана и системного звука", "без него не слышно собеседников", "Privacy_ScreenCapture"]);
+  if (p.calendar === "denied") miss.push(["Календари", "без него не подтянутся участники встречи", "Privacy_Calendars"]);
+  $("permBanner").hidden = !miss.length;
+  $("permBanner").innerHTML = miss.length ? `<b>Нет разрешений macOS</b>${miss.map(([t, why, pane]) =>
+    `<div class="perm-row"><span>${esc(t)} <span class="muted">— ${esc(why)}</span></span>
+     <button class="link small" type="button" data-pane="${pane}">Открыть настройки</button></div>`).join("")}` : "";
+}
+$("permBanner").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-pane]");
+  if (b) { native("openPrivacy", { pane: b.dataset.pane }); toast("Включите Meeting Agent в открывшемся разделе. Для записи экрана может понадобиться перезапуск приложения", 7000); }
+});
 
 // ---------- очередь обработки ----------
 
@@ -2057,6 +2077,10 @@ function renderSettings() {
           .map(([id, t, d]) => `<label class="check"><input type="checkbox" data-platform="${id}"${(s.auto_platforms || []).includes(id) ? " checked" : ""}> ${t} <span class="muted small">— ${d}</span></label>`).join("")}
         <div class="hint">${IS_WIN ? "Для Teams, Телемоста и браузера записывается весь звук компьютера."
           : "Teams, Телемост и браузер определяются по тому, кто пишет микрофон (нужна macOS 14.2 или новее), записывается весь звук системы."}</div></div>
+      ${IS_WIN ? "" : `<label class="check"><input type="checkbox" id="sEcho"${s.echo_cancel ? " checked" : ""}> Подавлять эхо в микрофоне</label>
+      <div class="hint">Если говорите без наушников, голос собеседников из динамиков попадает в микрофон. Подавление эха macOS вычитает его — расшифровка точнее. Действует со следующей записи.</div>
+      <label class="check"><input type="checkbox" id="sPill"${s.recording_pill ? " checked" : ""}> Плашка записи поверх окон</label>
+      <div class="hint">Пока идёт запись: время, «Стоп» и «✕ не записывать». Если микрофон молчит или пропал звук собеседников — плашка предупредит.</div>`}
       <label class="check"><input type="checkbox" id="sCalendar"${s.calendar_participants ? " checked" : ""}> Брать название и участников встречи из календаря</label>
       <div class="hint">${IS_WIN ? "Из календаря Outlook (нужен установленный Outlook)." : "Из приложения «Календарь» (аккаунты Exchange, Google, iCloud — Системные настройки → Интернет-аккаунты)."}
         Участники станут списком встречи, если вы не задали его вручную: это помогает подписать собеседников по именам. Календарь не меняется и никуда не отправляется.</div>
@@ -2129,6 +2153,8 @@ function renderSettings() {
     await save({ auto_platforms: list });
     native("reloadSettings");
   });
+  if ($("sEcho")) $("sEcho").onchange = async (e) => { await save({ echo_cancel: e.target.checked }); native("reloadSettings"); };
+  if ($("sPill")) $("sPill").onchange = async (e) => { await save({ recording_pill: e.target.checked }); native("reloadSettings"); };
   $("sCalendar").onchange = async (e) => {
     await save({ calendar_participants: e.target.checked }, e.target.checked ? "Участники будут браться из календаря" : "Календарь не используется");
     if (e.target.checked) native("calendarAccess");

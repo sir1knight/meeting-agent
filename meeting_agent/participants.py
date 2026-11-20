@@ -10,7 +10,7 @@ import json
 import re
 from pathlib import Path
 
-from . import config
+from . import config, osutil
 
 FILE = "participants.json"
 
@@ -41,7 +41,7 @@ def _write(path: Path, names: list[str]) -> list[str]:
     names = clean(names)
     path.parent.mkdir(parents=True, exist_ok=True)
     if names:
-        path.write_text(json.dumps({"names": names}, ensure_ascii=False), encoding="utf-8")
+        osutil.atomic_write_text(path, json.dumps({"names": names}, ensure_ascii=False))
     else:
         path.unlink(missing_ok=True)
     return names

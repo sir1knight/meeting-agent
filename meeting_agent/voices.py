@@ -16,6 +16,8 @@ import time
 import uuid
 from pathlib import Path
 
+from . import osutil
+
 log = logging.getLogger(__name__)
 
 SPEAKERS_FILE = "speakers.json"
@@ -247,7 +249,7 @@ def replace_in_note(note: Path, old: str, new: str) -> None:
         return
     text = note.read_text(encoding="utf-8")
     text = re.sub(re.escape(old) + r"(?![\w\d])", new.replace("\\", r"\\"), text)
-    note.write_text(text, encoding="utf-8")
+    osutil.atomic_write_text(note, text)
 
 
 def rename_speaker(cfg: dict, work: Path, label: str, name: str, remember: bool,
@@ -477,7 +479,7 @@ def reassign(cfg: dict, work: Path, index: int, to: str, note: Path | None) -> N
     data["protocol_stale"] = True
     data["names_guessed"] = False  # у нового собеседника имя ещё не угадывали
     write_speakers(work, data)
-    (work / SEGMENTS_FILE).write_text(json.dumps(seg_data, ensure_ascii=False), encoding="utf-8")
+    osutil.atomic_write_text((work / SEGMENTS_FILE), json.dumps(seg_data, ensure_ascii=False))
     rewrite_transcript(work, note)
 
 
@@ -493,7 +495,7 @@ def edit_text(work: Path, index: int, text: str, note: Path | None) -> None:
         segs[index]["edited"] = True
     else:
         del segs[index]
-    (work / SEGMENTS_FILE).write_text(json.dumps(seg_data, ensure_ascii=False), encoding="utf-8")
+    osutil.atomic_write_text((work / SEGMENTS_FILE), json.dumps(seg_data, ensure_ascii=False))
     rewrite_transcript(work, note)
 
 
@@ -503,7 +505,7 @@ def insert_segment(work: Path, index: int, seg: dict, note: Path | None) -> None
     segs = seg_data["segments"]
     keep = {k: seg[k] for k in ("start", "end", "text", "speaker", "spk", "edited") if k in seg}
     segs.insert(max(0, min(index, len(segs))), keep)
-    (work / SEGMENTS_FILE).write_text(json.dumps(seg_data, ensure_ascii=False), encoding="utf-8")
+    osutil.atomic_write_text((work / SEGMENTS_FILE), json.dumps(seg_data, ensure_ascii=False))
     rewrite_transcript(work, note)
 
 
@@ -520,7 +522,7 @@ def rewrite_transcript(work: Path, note: Path | None) -> None:
 
     segs = apply_names(_read_segments(work)["segments"], work)
     md = merge.to_markdown(segs)
-    (work / "transcript.md").write_text(md, encoding="utf-8")
+    osutil.atomic_write_text((work / "transcript.md"), md)
     if not note or not note.exists():
         return
     text = note.read_text(encoding="utf-8")
@@ -529,7 +531,7 @@ def rewrite_transcript(work: Path, note: Path | None) -> None:
         text = head + sep + "\n" + md + "\n"
     participants = ", ".join(dict.fromkeys(s["speaker"] for s in segs))
     text = re.sub(r"^participants: .*$", lambda _: f"participants: {participants}", text, count=1, flags=re.M)
-    note.write_text(text, encoding="utf-8")
+    osutil.atomic_write_text(note, text)
 
 
 def refresh_dirty(work: Path, others16: Path, others_offset: float, cfg: dict) -> None:

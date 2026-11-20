@@ -9,7 +9,7 @@ import re
 import uuid
 from pathlib import Path
 
-from . import config
+from . import config, osutil
 
 BUILTIN_TITLES = {"meeting": "Рабочая встреча", "standup": "Стендап",
                   "client": "Встреча с партнёром", "interview": "Custdev-интервью",
@@ -84,7 +84,7 @@ def save(name: str | None, title: str, body: str) -> dict:
         body = "Первой строкой ответа напиши: TITLE: <короткое название встречи, 3–7 слов>\n\n" + body
     name = name if _valid(name or "") else "my-" + uuid.uuid4().hex[:8]
     USER_DIR.mkdir(parents=True, exist_ok=True)
-    _user(name).write_text(f"<!-- title: {title.replace('-->', '')} -->\n{body}\n", encoding="utf-8")
+    osutil.atomic_write_text(_user(name), f"<!-- title: {title.replace('-->', '')} -->\n{body}\n")
     return get(name)
 
 
