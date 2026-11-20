@@ -602,7 +602,8 @@ function updCount() {
   let n = 0;
   if (u.code_available) n++;
   if (u.pending) n++;  // скачано и ждёт перезапуска — напоминание
-  if (u.platform === "windows" && (u.packages_changed || u.packages_pending)) n++;
+  if ((u.platform === "windows" || !u.python_bundled) && (u.packages_changed || u.packages_pending)) n++;
+  if (u.shell_download) n++;
   if (IS_WIN && g && g.nvidia && g.outdated) n++;
   n += Object.values(models).filter((m) => m.required && m.status !== "ready" && m.status !== "downloading").length;
   return n;
@@ -657,11 +658,11 @@ function updWindowHtml() {
   else code = updRow("Код и интерфейс", `<span class="badge ok">${esc(u.version)} — последняя</span>`, "");
   out.push(code);
 
-  // 2. Пакеты Python (Windows)
-  if (u.platform === "windows") {
+  // 2. Пакеты Python (Windows; Mac — с 1.5, когда Python не внутри приложения)
+  if (u.platform === "windows" || !u.python_bundled) {
     const need = u.packages_changed || u.packages_pending;
     out.push(updRow("Пакеты Python", need ? '<span class="badge warn">есть новые</span>' : '<span class="badge ok">актуальны</span>',
-      need ? (u.packages_pending ? "Поставятся при следующем запуске приложения (окно консоли, несколько минут) — когда удобно." : "Сначала скачайте новую версию кода — список пакетов придёт вместе с ней.") : "",
+      need ? (u.packages_pending ? `Поставятся при следующем запуске приложения (${IS_WIN ? "окно консоли" : "окно «Установка компонентов»"}, несколько минут) — докачаются только изменившиеся.` : "Сначала скачайте новую версию кода — список пакетов придёт вместе с ней.") : "",
       u.packages_pending && !u.pending ? '<button class="ghost small" type="button" data-upd="restart">Перезапустить сейчас</button>' : ""));
   }
 
@@ -687,9 +688,13 @@ function updWindowHtml() {
   }
 
   // 5. Оболочка
-  out.push("<h3>Приложение</h3>" + updRow(u.platform === "mac" ? "Оболочка (Swift)" : "Оболочка (Meeting Agent.exe и Python)",
-    known && u.shell_needed ? '<span class="badge warn">нужна новая</span>' : `<span class="badge ok">версия ${esc(u.shell || "?")}</span>`,
-    "Обновляется только новой версией приложения целиком — если она понадобится, здесь появится ссылка.", ""));
+  const sd = u.shell_download;
+  out.push("<h3>Приложение</h3>" + updRow(u.platform === "mac" ? "Приложение (окно, запись звука)" : "Оболочка (Meeting Agent.exe и Python)",
+    sd ? `<span class="badge warn">версия ${esc(u.shell)} → ${esc(sd.version)}</span>`
+      : known && u.shell_needed ? '<span class="badge warn">нужна новая</span>' : `<span class="badge ok">версия ${esc(u.shell || "?")}</span>`,
+    sd ? `Новое приложение${sd.size ? ` (~${Math.round(sd.size / 1048576)} МБ)` : ""}: скачается, проверится подпись, приложение закроется и откроется уже новым — разрешения macOS сохранятся.${u.python_bundled ? " Python и пакеты переедут из приложения в папку данных: дальше они обновляются этой же кнопкой и только частями." : ""} Во время записи не обновляется.`
+      : u.platform === "mac" ? "Обновляется этой же кнопкой, когда выходит новая версия." : "Обновляется только новой версией приложения целиком — если она понадобится, здесь появится ссылка.",
+    sd ? `<button class="primary small" type="button" data-upd="shell"${UPD.busy ? " disabled" : ""}>${UPD.busy === "shell" ? "Обновляю…" : "Обновить"}</button>` : ""));
 
   const n = updCount();
   out.push(`<div class="dlg-actions upd-actions">
@@ -767,6 +772,21 @@ async function updAction(act) {
     await restartNow();
   } else if (act === "all") {
     await updateAll();
+  } else if (act === "shell") {
+    await installShell();
+  }
+}
+
+// Новое приложение (Mac): скачать, проверить подпись, закрыться — помощник заменит и откроет новое.
+async function installShell() {
+  UPD.busy = "shell"; paintUpdWindow();
+  try {
+    await api("update/shell", { method: "POST", body: {} });
+    toast("Новое приложение готово — Meeting Agent закроется и откроется заново через несколько секунд", 15000);
+  } catch (e) {
+    UPD.error = e.message;
+    UPD.busy = "";
+    paintUpdWindow();
   }
 }
 
@@ -828,6 +848,7 @@ async function updateAll() {
     }
     const u = UPD.info || {};
     if (u.code_available && !u.shell_needed) await applyCode();
+    if (u.shell_download) { await installShell(); return; }  // последним: приложение перезапустится
     toast(UPD.info && UPD.info.pending ? "Всё скачано. Новая версия применится при перезапуске — когда будет удобно" : "Готово", 6000);
   } finally {
     if (UPD.busy === "all") UPD.busy = "";

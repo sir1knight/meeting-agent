@@ -1,8 +1,10 @@
-"""Windows: установка и обновление пакетов Python (PyTorch, faster-whisper, llama.cpp, pyannote…).
+"""Установка и обновление пакетов Python (PyTorch, Whisper, GigaAM, pyannote…) через uv — с PyPI, строго
+версии из списка requirements-<платформа>.lock.
 
-Маленький установщик приходит без пакетов: при первом запуске (и после обновления кода, если поменялся
-requirements-windows.lock) Meeting Agent.exe открывает окно консоли и ставит их через uv — с PyPI
-(и llama-cpp-python со страницы его автора), строго версии из списка. Запуск: python -m meeting_agent bootstrap
+Windows: маленький установщик приходит без пакетов — Meeting Agent.exe открывает окно консоли и ставит их.
+Mac (с 1.5): Python и пакеты лежат не внутри приложения, а в папке данных (runtime/) — оболочка показывает
+окно «Установка компонентов» и выводит в него ход установки. Ставится при первом запуске и после обновления
+кода, если поменялся список. Запуск: python -m meeting_agent bootstrap [--check]
 """
 
 import os
@@ -12,21 +14,31 @@ import time
 from pathlib import Path
 
 from . import config
-from .updates import lock_hash, site_packages
+from .osutil import IS_WIN
+from .updates import lock_file, lock_hash, site_packages
 
 LLAMA_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 # uv не входит в маленький установщик (GitVerse не принимает файлы больше ~12 МБ): берём его с PyPI,
 # как и остальные пакеты, и сверяем контрольную сумму.
-UV_WHEEL = ("https://files.pythonhosted.org/packages/dd/ef/ceeabf3631117f7354787d9fb1ffe943899e59ed4b887a696ed547e47e76/"
-            "uv-0.13.9-py3-none-win_amd64.whl")
-UV_SHA256 = "6a44b2ed8111d2f60d2b92627c5dccda3f7ed7570b18ce115e569cd68c28246b"
-UV_MEMBER = "uv-0.13.9.data/scripts/uv.exe"
-NATIVE = ("llama-cpp-python", "torch", "ctranslate2")  # только готовые сборки для Windows
+if IS_WIN:
+    UV_WHEEL = ("https://files.pythonhosted.org/packages/dd/ef/ceeabf3631117f7354787d9fb1ffe943899e59ed4b887a696ed547e47e76/"
+                "uv-0.13.9-py3-none-win_amd64.whl")
+    UV_SHA256 = "6a44b2ed8111d2f60d2b92627c5dccda3f7ed7570b18ce115e569cd68c28246b"
+    UV_MEMBER = "uv-0.13.9.data/scripts/uv.exe"
+    UV_NAME = "uv.exe"
+    NATIVE = ("llama-cpp-python", "torch", "ctranslate2")  # только готовые сборки для Windows
+else:
+    UV_WHEEL = ("https://files.pythonhosted.org/packages/f3/a7/a8d7b074798c7fb3b26b37584b8fe2e29df2ccdc24ce7902caab2a53edbf/"
+                "uv-0.13.9-py3-none-macosx_11_0_arm64.whl")
+    UV_SHA256 = "66c512266d633bef48384a1f53003f41f2a8e7b36fe6e7fbfd3e0fd52d96fa63"
+    UV_MEMBER = "uv-0.13.9.data/scripts/uv"
+    UV_NAME = "uv"
+    NATIVE = ("torch", "mlx", "mlx-metal")
 
 
 def uv_exe() -> Path | None:
     exe = Path(sys.executable).resolve()
-    for p in (exe.parents[1] / "tools" / "uv.exe", exe.parent / "Scripts" / "uv.exe", config.HOME / "tools" / "uv.exe"):
+    for p in (exe.parents[1] / "tools" / UV_NAME, exe.parent / "Scripts" / UV_NAME, config.HOME / "tools" / UV_NAME):
         if p.exists():
             return p
     return _download_uv()
@@ -38,7 +50,7 @@ def _download_uv() -> Path | None:
     import urllib.request
     import zipfile
 
-    dest = config.HOME / "tools" / "uv.exe"
+    dest = config.HOME / "tools" / UV_NAME
     dest.parent.mkdir(parents=True, exist_ok=True)
     wheel = dest.with_name("uv.whl")
     print("Скачиваю установщик пакетов uv (~15 МБ)…")
@@ -51,6 +63,8 @@ def _download_uv() -> Path | None:
                 raise IOError("контрольная сумма не совпала")
             with zipfile.ZipFile(wheel) as z, z.open(UV_MEMBER) as src, open(dest, "wb") as out:
                 out.write(src.read())
+            if not IS_WIN:
+                dest.chmod(0o755)
             wheel.unlink(missing_ok=True)
             return dest
         except Exception as e:
@@ -60,19 +74,25 @@ def _download_uv() -> Path | None:
     return None
 
 
+def _pause() -> None:
+    if IS_WIN:  # окно консоли закрылось бы сразу; на Mac ход установки показывает окно оболочки
+        input("\nНажмите Enter, чтобы закрыть окно…")
+
+
 def run() -> int:
-    lock = config.ROOT / "requirements-windows.lock"
-    print("Meeting Agent — установка компонентов\n")
-    print("Скачиваются пакеты Python (около 350 МБ): распознавание речи, разделение собеседников,")
-    print("локальная модель протоколов. Это нужно один раз, потом — только при обновлениях.\n")
+    lock = lock_file()
+    print("Meeting Agent — установка компонентов\n", flush=True)
+    print(f"Скачиваются пакеты Python (около {'350 МБ' if IS_WIN else '600 МБ'}): распознавание речи, разделение "
+          "собеседников, локальная модель протоколов. Это нужно один раз, потом — только при обновлениях.\n", flush=True)
     uv = uv_exe()
     if not uv or not lock.exists():
-        print("Не удалось получить uv.exe (нужен доступ к files.pythonhosted.org) или нет списка пакетов.")
-        input("\nНажмите Enter, чтобы закрыть окно…")
+        print("Не удалось получить установщик пакетов uv (нужен доступ к files.pythonhosted.org) или нет списка пакетов.")
+        _pause()
         return 2
-    python = Path(sys.executable).resolve().with_name("python.exe")
-    cmd = [str(uv), "pip", "install", "--python", str(python), "--no-deps", "-r", str(lock),
-           "--extra-index-url", LLAMA_INDEX, "--index-strategy", "unsafe-best-match"]
+    python = Path(sys.executable).resolve().with_name("python.exe") if IS_WIN else Path(sys.executable)
+    cmd = [str(uv), "pip", "install", "--python", str(python), "--no-deps", "-r", str(lock)]
+    if IS_WIN:
+        cmd += ["--extra-index-url", LLAMA_INDEX, "--index-strategy", "unsafe-best-match"]
     for pkg in NATIVE:
         cmd += ["--only-binary", pkg]
     env = dict(os.environ, UV_CACHE_DIR=str(config.HOME / "uv-cache"), UV_NO_PROGRESS="0",
@@ -90,5 +110,5 @@ def run() -> int:
             time.sleep(10)
     print("\nНе удалось скачать пакеты. Проверьте интернет (доступ к pypi.org и files.pythonhosted.org)")
     print("и запустите Meeting Agent снова. Если интернет закрыт прокси — попросите полный архив приложения.")
-    input("\nНажмите Enter, чтобы закрыть окно…")
+    _pause()
     return 1

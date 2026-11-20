@@ -3,14 +3,25 @@
 # со всеми пакетами, код обработки и интерфейс. Модели скачиваются при первом запуске
 # в ~/Library/Application Support/Meeting Agent.
 #
-#   ./build_app.sh            — собрать
-#   ./build_app.sh --install  — собрать и заменить копию в /Applications
+#   ./build_app.sh            — собрать полное приложение (Python и пакеты внутри, ~1,6 ГБ — для сетей без PyPI)
+#   ./build_app.sh --thin     — тонкое приложение (~10 МБ): Python и пакеты ставятся при первом запуске
+#                               в папку данных и дальше обновляются кнопкой «Обновить»; → build/Meeting-Agent-Mac.zip
+#   ./build_app.sh --install  — собрать полное и заменить копию в /Applications
 #
 # Пакеты Python берутся из .venv проекта (если версия Python совпадает) — без интернета.
 # Иначе ставятся через pip (нужен интернет, ~1,5 ГБ).
 set -euo pipefail
 cd "$(dirname "$0")"
 python3 scripts/sync_version.py   # версия и «что нового» из CHANGELOG.md → version.json
+# Хеш списка пакетов Mac: приложение с Python вне .app доставит пакеты, если список поменялся.
+python3 - "$(shasum -a 256 requirements-mac.lock | cut -c1-16)" <<'PY'
+import json, sys
+m = json.load(open("version.json"))
+if m.setdefault("packages", {}).get("mac_hash") != sys.argv[1]:
+    m["packages"]["mac_hash"] = sys.argv[1]
+    m["packages"]["mac"] = "requirements-mac.lock"
+    json.dump(m, open("version.json", "w"), ensure_ascii=False, indent=2); open("version.json", "a").write("\n")
+PY
 
 PY_TAG="20261021"
 PY_VER="3.12.15"
@@ -20,6 +31,9 @@ RES="${APP}/Contents/Resources"
 CACHE="build/cache"
 
 say() { printf "\n\033[1m▸ %s\033[0m\n" "$1"; }
+THIN=0; [[ "${1:-}" == "--thin" ]] && THIN=1
+# Зеркало Python на GitLab (GitHub из некоторых сетей недоступен); проверяется по SHA-256 из runtime.json.
+PY_MIRROR="https://gitlab.com/api/v4/projects/sir1knight%2FMeeting_agent/packages/generic/python/${PY_VER}-${PY_TAG}/cpython-${PY_VER}-${PY_TAG}-aarch64-apple-darwin-install_only.tar.gz"
 
 [[ "$(uname -m)" == "arm64" ]] || { echo "Нужен Mac на Apple Silicon"; exit 1; }
 mkdir -p "${CACHE}"
@@ -33,7 +47,7 @@ fi
 # Готовое окружение кэшируется и пересобирается, только если поменялись зависимости.
 REQ_HASH=$(cat requirements.txt requirements-diarization.txt | shasum | cut -c1-12)
 ENV="${CACHE}/python-${PY_VER}-${REQ_HASH}"
-if [[ ! -x "${ENV}/bin/python3" ]]; then
+if [[ ${THIN} == 0 && ! -x "${ENV}/bin/python3" ]]; then
   say "Готовлю окружение Python с пакетами"
   rm -rf "${CACHE}"/python-"${PY_VER}"-* "${CACHE}/extract"
   mkdir -p "${CACHE}/extract"
@@ -61,16 +75,22 @@ fi
 say "Собираю приложение"
 rm -rf "${APP}"
 mkdir -p "${APP}/Contents/MacOS" "${RES}/app"
-cp -cR "${ENV}" "${RES}/python"
-cp -R meeting_agent templates ui config.toml version.json "${RES}/app/"
-# Версия оболочки (Swift): код, скачанный кнопкой «Обновить», проверяет, что она подходит (version.json → shell.mac).
-SHELL_VERSION=$(python3 -c "import json; print(json.load(open('version.json'))['shell']['mac'])")
+[[ ${THIN} == 0 ]] && cp -cR "${ENV}" "${RES}/python"
+cp -R meeting_agent templates ui config.toml requirements-mac.lock "${RES}/app/"
+# В приложение — version.json без ссылки на само приложение (её контрольная сумма известна только после сборки).
+python3 -c "import json,sys; m=json.load(open('version.json')); m.pop('shell_download', None); json.dump(m, open(sys.argv[1], 'w'), ensure_ascii=False, indent=2)" "${RES}/app/version.json"
+# Версия оболочки (Swift): shell_latest.mac — какая собирается; shell.mac — какая нужна коду (меньше или равна).
+SHELL_VERSION=$(python3 -c "import json; m=json.load(open('version.json')); print((m.get('shell_latest') or m['shell'])['mac'])")
 printf '{"shell": %s}\n' "${SHELL_VERSION}" > "${RES}/shell.json"
+# Откуда при первом запуске скачать Python (тонкая сборка): зеркало на GitLab, затем GitHub.
+PY_SHA=$(shasum -a 256 "${CACHE}/python.tar.gz" | cut -d' ' -f1)
+printf '{"python": [{"url": "%s", "sha256": "%s"}, {"url": "%s", "sha256": "%s"}]}\n' \
+  "${PY_MIRROR}" "${PY_SHA}" "${PY_URL}" "${PY_SHA}" > "${RES}/runtime.json"
 find "${RES}/app" -name "__pycache__" -type d -prune -exec rm -rf {} +
 
 say "Компилирую оболочку (Swift)"
 swiftc -O -target arm64-apple-macos13.0 app/main.swift app/Backend.swift app/Recording.swift \
-  app/Platforms.swift app/CalendarLookup.swift app/WebWindow.swift app/RecordingPill.swift recorder/Recorder.swift -o "${APP}/Contents/MacOS/Meeting Agent" 2>&1 \
+  app/Platforms.swift app/CalendarLookup.swift app/WebWindow.swift app/RecordingPill.swift app/RuntimeSetup.swift recorder/Recorder.swift -o "${APP}/Contents/MacOS/Meeting Agent" 2>&1 \
   | grep -v -E "installTap|DeprecatedDeclaration|^\s*[0-9]+ \||^\s*\||^\s*$|docs.swift.org" || true
 [[ -x "${APP}/Contents/MacOS/Meeting Agent" ]] || { echo "Ошибка компиляции"; exit 1; }
 
@@ -136,7 +156,12 @@ codesign --verify "${APP}" && echo "Подпись в порядке"
 
 du -sh "${APP}" | awk '{print "Размер: " $1}'
 
-if [[ "${1:-}" == "--install" ]]; then
+if [[ ${THIN} == 1 ]]; then
+  rm -f build/Meeting-Agent-Mac.zip
+  ditto -c -k --norsrc --noextattr --keepParent "${APP}" build/Meeting-Agent-Mac.zip
+  du -h build/Meeting-Agent-Mac.zip | awk '{print "Архив: build/Meeting-Agent-Mac.zip, " $1}'
+  shasum -a 256 build/Meeting-Agent-Mac.zip | awk '{print "SHA-256: " $1}'
+elif [[ "${1:-}" == "--install" ]]; then
   say "Устанавливаю в /Applications"
   osascript -e 'quit app "Meeting Agent"' 2>/dev/null || true
   sleep 1

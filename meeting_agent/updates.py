@@ -3,7 +3,8 @@
 Компоненты:
   • код и интерфейс (meeting_agent, ui, templates, config.toml) — архив ветки main, распаковывается
     в <данные>/app-code/<версия>; при запуске __main__.py берёт его вместо встроенного;
-  • пакеты Python (только Windows) — список requirements-windows.lock из новой версии кода; ставятся через uv
+  • пакеты Python (Windows и Mac с Python вне приложения) — список requirements-<платформа>.lock из новой
+    версии кода; ставятся через uv
     при следующем запуске приложения (bootstrap.py), пока ничего из них не загружено;
   • оболочка (Swift-приложение на Mac, Meeting Agent.exe и Python на Windows) — так не обновляется:
     если новой версии кода нужна новая оболочка, приложение предложит скачать его целиком;
@@ -43,7 +44,8 @@ SOURCES = {
                "page": f"https://gitlab.com/{REPO}"},
 }
 PAGE = SOURCES["GitVerse"]["page"]
-KEEP = ("meeting_agent", "ui", "templates", "config.toml", "version.json", "requirements-windows.lock")
+KEEP = ("meeting_agent", "ui", "templates", "config.toml", "version.json", "requirements-windows.lock",
+        "requirements-mac.lock")
 
 
 def _vt(v: str) -> tuple:
@@ -72,9 +74,32 @@ def overlay_dir() -> Path:
     return config.HOME / "app-code"
 
 
+def app_bundle() -> Path | None:
+    """Mac: путь к Meeting Agent.app (оболочка передаёт его серверу; у старых сборок Python внутри .app)."""
+    if osutil.IS_WIN:
+        return None
+    if os.environ.get("MEETING_AGENT_APP"):
+        return Path(os.environ["MEETING_AGENT_APP"])
+    for p in Path(sys.executable).resolve().parents:
+        if p.suffix == ".app":
+            return p
+    return None
+
+
+def python_bundled() -> bool:
+    """Mac: Python и пакеты внутри .app (сборки до 1.5) — пакеты обновляются только вместе с приложением."""
+    return not osutil.IS_WIN and ".app/Contents/Resources/python" in str(Path(sys.executable).resolve())
+
+
+def lock_file(root: Path | None = None) -> Path:
+    return (root or config.ROOT) / ("requirements-windows.lock" if osutil.IS_WIN else "requirements-mac.lock")
+
+
 def shell_version() -> int:
     exe = Path(sys.executable).resolve()
-    for p in (exe.parents[2] / "shell.json", exe.parents[1] / "shell.json"):
+    app = app_bundle()
+    cands = [app / "Contents/Resources/shell.json"] if app else []
+    for p in cands + [exe.parents[2] / "shell.json", exe.parents[1] / "shell.json"]:
         try:
             return int(json.loads(p.read_text(encoding="utf-8")).get("shell", 1))
         except (OSError, ValueError, IndexError):
@@ -90,7 +115,10 @@ def lock_hash(path: Path) -> str:
 
 
 def site_packages() -> Path:
-    return Path(sys.executable).resolve().parent / "Lib" / "site-packages"
+    exe = Path(sys.executable).resolve()
+    if osutil.IS_WIN:
+        return exe.parent / "Lib" / "site-packages"
+    return exe.parents[1] / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
 
 
 def installed_packages_hash() -> str:
@@ -101,10 +129,11 @@ def installed_packages_hash() -> str:
 
 
 def packages_needed(root: Path | None = None) -> bool:
-    """Windows: пакеты не совпадают со списком этой версии кода (или ещё не ставились)."""
-    if not osutil.IS_WIN:
+    """Пакеты не совпадают со списком этой версии кода (или ещё не ставились). На Mac со встроенным
+    в приложение Python — никогда: там пакеты меняются только вместе с приложением."""
+    if python_bundled():
         return False
-    want = lock_hash((root or config.ROOT) / "requirements-windows.lock")
+    want = lock_hash(lock_file(root))
     return bool(want) and want != installed_packages_hash()
 
 
@@ -241,6 +270,7 @@ def status() -> dict:
             "bundled": bundled.get("app", "1.0.0"), "shell": shell_version(),
             "overlay": config.ROOT.resolve() != bundled_root().resolve(), "pending": p,
             "packages_pending": packages_needed(root_next) if root_next else packages_needed(), "page": PAGE,
+            "python_bundled": python_bundled(),
             "just_updated": just_updated()}
 
 
@@ -252,9 +282,12 @@ def check(max_age_hours: float = 0) -> dict:
     st.update(source=m.get("_source", ""), latest=latest, notes=m.get("notes", ""), changes=m.get("changes") or {}, date=m.get("date", ""),
               code_available=_vt(latest) > _vt(st["version"]) and latest != st["pending"],
               shell_needed=need_shell > st["shell"], shell_latest=need_shell)
-    if osutil.IS_WIN:
-        want = (m.get("packages") or {}).get("windows_hash", "")
+    if not python_bundled():
+        want = (m.get("packages") or {}).get(f"{platform()}_hash", "")
         st["packages_changed"] = bool(want) and want != installed_packages_hash()
+    # Новая оболочка (Mac): маленький Meeting-Agent-Mac.zip — ставится этой же кнопкой (install_shell).
+    dl = (m.get("shell_download") or {}).get(platform()) or {}
+    st["shell_download"] = dl if dl.get("url") and int(dl.get("version", 0)) > st["shell"] and app_bundle() else None
     return st
 
 
@@ -305,7 +338,7 @@ def apply_code() -> dict:
                             "import meeting_agent.server, meeting_agent.pipeline", str(tmp)],
                            capture_output=True, text=True, timeout=180, cwd=str(tmp),
                            env=dict(os.environ, MEETING_AGENT_NO_OVERLAY="1"), **osutil.popen_kwargs())
-    if probe.returncode != 0 and not (osutil.IS_WIN and "ModuleNotFoundError" in probe.stderr):
+    if probe.returncode != 0 and not (not python_bundled() and "ModuleNotFoundError" in probe.stderr):
         shutil.rmtree(tmp, ignore_errors=True)
         err = (probe.stderr.strip().splitlines() or ["?"])[-1]
         raise RuntimeError(f"Новая версия не запускается на этом компьютере: {err}")
@@ -333,3 +366,87 @@ def reset_code() -> None:
 
 def cancel_pending() -> None:
     (overlay_dir() / "pending.txt").unlink(missing_ok=True)
+
+
+# ---------- новая оболочка (Mac): маленький Meeting-Agent-Mac.zip этой же кнопкой ----------
+
+SHELL_STAGE = "shell-update"
+
+_HELPER = r"""#!/bin/bash
+# Замена Meeting Agent.app новой версией: ждём, пока приложение закроется, меняем и открываем снова.
+APP_PID="$1"; OLD="$2"; NEW="$3"; RUNTIME="$4"; LOCK_HASH="$5"; LOG="$6"
+exec >>"$LOG" 2>&1
+echo "$(date '+%F %T') замена оболочки: $OLD"
+for i in $(seq 1 120); do kill -0 "$APP_PID" 2>/dev/null || break; sleep 0.5; done
+# Переход со сборок, где Python был внутри приложения: забираем его, чтобы не скачивать 1,5 ГБ заново.
+if [ -d "$OLD/Contents/Resources/python" ] && [ ! -x "$RUNTIME/python/bin/python3" ]; then
+  mkdir -p "$RUNTIME" && mv "$OLD/Contents/Resources/python" "$RUNTIME/python" && \
+    SP=$(ls -d "$RUNTIME"/python/lib/python3.*/site-packages | head -1) && echo -n "$LOCK_HASH" > "$SP/.meeting-agent-lock" && \
+    echo "Python перенесён в $RUNTIME/python"
+fi
+BAK="$(dirname "$NEW")/previous.app"
+rm -rf "$BAK"
+if mv "$OLD" "$BAK" && mv "$NEW" "$OLD"; then
+  echo "готово"; rm -rf "$BAK"
+else
+  echo "не удалось заменить — возвращаю прежнюю версию"; [ -d "$BAK" ] && [ ! -d "$OLD" ] && mv "$BAK" "$OLD"
+fi
+open "$OLD"
+"""
+
+
+def _signer(app: Path) -> str:
+    """Чем подписано приложение: строки Authority/TeamIdentifier из codesign (пусто — подписи нет)."""
+    r = subprocess.run(["codesign", "-dvv", str(app)], capture_output=True, text=True)
+    return "\n".join(l for l in r.stderr.splitlines() if l.startswith(("Authority=", "TeamIdentifier=")))
+
+
+def install_shell(recording: bool = False) -> dict:
+    """Mac: скачать новую оболочку, проверить контрольную сумму и подпись (та же, что у установленной —
+    тогда macOS сохранит разрешения на микрофон и запись экрана), закрыть приложение и заменить его."""
+    if osutil.IS_WIN:
+        raise RuntimeError("На Windows оболочка обновляется установщиком")
+    if recording:
+        raise RuntimeError("Идёт запись — обновите приложение после встречи")
+    dl = (remote_manifest().get("shell_download") or {}).get("mac") or {}
+    if not dl.get("url") or int(dl.get("version", 0)) <= shell_version():
+        raise RuntimeError("Новой версии приложения нет")
+    app = app_bundle()
+    if not app or not app.is_dir():
+        raise RuntimeError("Не нашёл, где установлено приложение")
+    stage = config.HOME / SHELL_STAGE
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(parents=True)
+    archive = stage / "Meeting-Agent-Mac.zip"
+    import requests
+
+    with requests.get(dl["url"], stream=True, timeout=120) as r:
+        if r.status_code != 200:
+            raise RuntimeError(f"Не удалось скачать приложение (ответ {r.status_code})")
+        with open(archive, "wb") as f:
+            for chunk in r.iter_content(1 << 20):
+                f.write(chunk)
+    if dl.get("sha256") and hashlib.sha256(archive.read_bytes()).hexdigest() != dl["sha256"]:
+        raise RuntimeError("Скачанное приложение повреждено (не совпала контрольная сумма) — попробуйте ещё раз")
+    subprocess.run(["ditto", "-x", "-k", str(archive), str(stage)], check=True)
+    new = stage / "Meeting Agent.app"
+    if not new.is_dir():
+        raise RuntimeError("В архиве нет Meeting Agent.app")
+    if subprocess.run(["codesign", "--verify", "--deep", str(new)], capture_output=True).returncode != 0:
+        raise RuntimeError("Подпись нового приложения не прошла проверку — обновление отменено")
+    if _signer(new) != _signer(app):
+        raise RuntimeError("Новое приложение подписано не тем сертификатом — обновление отменено")
+    subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(new)], capture_output=True)
+    helper = stage / "replace.sh"
+    helper.write_text(_HELPER, encoding="utf-8")
+    helper.chmod(0o755)
+    runtime = config.HOME / "runtime"
+    subprocess.Popen(["/bin/bash", str(helper), str(os.getppid()), str(app), str(new), str(runtime),
+                      lock_hash(lock_file()), str(config.HOME / "logs" / "shell-update.log")],
+                     start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
+    log.info("Новая оболочка %s готова — приложение перезапустится", dl.get("version"))
+    # Обычный выход приложения (запись, если идёт, дописывается) — помощник дождётся и заменит.
+    subprocess.Popen(["osascript", "-e", 'quit app id "local.meeting-agent"'], stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
+    return {"ok": True, "version": dl.get("version")}

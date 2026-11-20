@@ -38,7 +38,8 @@ def main() -> None:  # pipeline импортируется по месту: boot
     lv = sub.add_parser("live", help="распознавать запись, пока она идёт (запускает приложение)")
     lv.add_argument("folder")
 
-    sub.add_parser("bootstrap", help="Windows: установить или обновить пакеты Python (окно консоли)")
+    bs = sub.add_parser("bootstrap", help="установить или обновить пакеты Python (Windows, Mac с Python вне приложения)")
+    bs.add_argument("--check", action="store_true", help="только проверить: код 0 — всё на месте, 10 — нужна установка")
     sub.add_parser("winapp", help="приложение для Windows: трей, окно, запись (запускает Meeting Agent.exe)")
 
     sv = sub.add_parser("serve", help="локальный сервер окна приложения")
@@ -105,6 +106,9 @@ def main() -> None:  # pipeline импортируется по месту: boot
 
     elif args.cmd == "bootstrap":
         from .bootstrap import run as bootstrap_run
+        if args.check:
+            from .updates import packages_needed
+            sys.exit(10 if packages_needed() else 0)
         sys.exit(bootstrap_run())
 
     elif args.cmd == "winapp":

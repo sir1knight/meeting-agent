@@ -970,6 +970,11 @@ class Handler(BaseHTTPRequestHandler):
         from . import updates
         self._json(updates.apply_code())  # только скачать: применится при перезапуске
 
+    def api_post_update_shell(self, q):
+        """Mac: новое приложение — скачать, проверить, закрыться; помощник заменит и откроет его."""
+        from . import updates
+        self._json(updates.install_shell(recording=self.state.recording.get("state") == "recording"))
+
     def api_post_update_seen(self, q):
         from . import updates
         updates.mark_seen()

@@ -38,7 +38,9 @@ def _vt(v: str) -> tuple:
 
 def _shell() -> int:
     exe = Path(sys.executable).resolve()
-    for p in (exe.parents[2] / "shell.json", exe.parents[1] / "shell.json"):  # Mac: Resources, Windows: корень
+    app = os.environ.get("MEETING_AGENT_APP")  # Mac с Python вне приложения: оболочка сообщает свой путь
+    cands = [Path(app) / "Contents/Resources/shell.json"] if app else []
+    for p in cands + [exe.parents[2] / "shell.json", exe.parents[1] / "shell.json"]:  # Mac: Resources, Windows: корень
         try:
             return int(json.loads(p.read_text(encoding="utf-8")).get("shell", 1))
         except (OSError, ValueError, IndexError):

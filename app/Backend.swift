@@ -12,7 +12,9 @@ final class Backend {
 
     static let home: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let dir = base.appendingPathComponent("Meeting Agent", isDirectory: true)
+        // MEETING_AGENT_HOME — отдельная папка данных (для проверки сборки, не мешая основной).
+        let dir = ProcessInfo.processInfo.environment["MEETING_AGENT_HOME"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? base.appendingPathComponent("Meeting Agent", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
@@ -30,25 +32,39 @@ final class Backend {
         port = Backend.freePort()
     }
 
-    /// Где лежит Python и код: внутри .app (Resources/python, Resources/app),
-    /// а для разработки — папка проекта из MEETING_AGENT_DEV.
-    private func locate() -> (python: URL, root: URL)? {
+    private let setup = RuntimeSetup()
+
+    /// Где лежит Python и код. Код — в .app (Resources/app). Python — внутри .app у полной сборки
+    /// (Resources/python), иначе в папке данных (runtime/python — ставится при первом запуске).
+    /// Для разработки — папка проекта из MEETING_AGENT_DEV.
+    private func locate() -> (python: URL, root: URL, bundled: Bool)? {
         let env = ProcessInfo.processInfo.environment
         if let dev = env["MEETING_AGENT_DEV"] {
             let root = URL(fileURLWithPath: dev)
-            return (root.appendingPathComponent(".venv/bin/python"), root)
+            return (root.appendingPathComponent(".venv/bin/python"), root, true)
         }
         guard let res = Bundle.main.resourceURL else { return nil }
         let python = res.appendingPathComponent("python/bin/python3")
-        guard FileManager.default.isExecutableFile(atPath: python.path) else { return nil }
-        return (python, res.appendingPathComponent("app"))
+        if FileManager.default.isExecutableFile(atPath: python.path) {
+            return (python, res.appendingPathComponent("app"), true)
+        }
+        return (RuntimeSetup.python, res.appendingPathComponent("app"), false)
     }
 
     func start() {
-        guard let (python, root) = locate() else {
-            NSLog("Meeting Agent: не найден встроенный Python")
+        guard let (_, root, bundled) = locate() else {
+            NSLog("Meeting Agent: не найден код приложения")
             return
         }
+        if bundled { return launch() }
+        // Python вне приложения: при первом запуске — установить, потом — проверить список пакетов.
+        setup.ensure(root: root) { [weak self] ok in
+            if ok { self?.launch() } else { NSLog("Meeting Agent: компоненты не установлены") }
+        }
+    }
+
+    private func launch() {
+        guard let (python, root, _) = locate() else { return }
         let p = Process()
         p.executableURL = python
         p.arguments = ["-m", "meeting_agent", "serve", "--port", String(port)]
@@ -58,6 +74,7 @@ final class Backend {
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["MEETING_AGENT_HOME"] = Backend.home.path
+        env["MEETING_AGENT_APP"] = Bundle.main.bundlePath  // версия оболочки и её обновление (updates.py)
         env["MEETING_AGENT_TOKEN"] = token
         env["HF_HOME"] = Backend.home.appendingPathComponent("huggingface").path
         env["HF_HUB_OFFLINE"] = "1"           // модели скачиваются только по кнопке в окне
