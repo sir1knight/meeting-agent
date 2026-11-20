@@ -1,7 +1,9 @@
 """Точка входа: python -m meeting_agent …
 
 Если по кнопке «Обновить» скачана более новая версия кода (<данные>/app-code/<версия>), запускается она,
-а не встроенная в приложение: так обновляются код и интерфейс без переустановки. Новая версия берётся,
+а не встроенная в приложение: так обновляются код и интерфейс без переустановки. Скачанная версия ждёт
+в pending.txt и становится текущей (current.txt) только при запуске сервера или приложения — тогда, когда
+удобно пользователю; процессы, которые запускает уже работающий сервер, остаются на его версии. Новая версия берётся,
 только если она новее встроенной и подходит к установленной оболочке (Swift-приложение на Mac,
 Meeting Agent.exe и Python на Windows). Отключить: MEETING_AGENT_NO_OVERLAY=1.
 """
@@ -44,10 +46,29 @@ def _shell() -> int:
     return 1
 
 
+def _promote(base: Path) -> None:
+    """Перезапуск: скачанная версия (pending.txt) или откат (pending.txt = «bundled») становится текущей."""
+    pending = base / "pending.txt"
+    try:
+        want = pending.read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    try:
+        if want == "bundled":
+            (base / "current.txt").unlink(missing_ok=True)
+        elif (base / want / "meeting_agent" / "__init__.py").exists():
+            (base / "current.txt").write_text(want, encoding="utf-8")
+        pending.unlink()
+    except OSError:
+        pass
+
+
 def _overlay(here: Path) -> Path | None:
     if os.environ.get("MEETING_AGENT_NO_OVERLAY"):
         return None
     base = _home() / "app-code"
+    if len(sys.argv) > 1 and sys.argv[1] in ("serve", "winapp", "web"):
+        _promote(base)
     try:
         d = base / (base / "current.txt").read_text(encoding="utf-8").strip()
     except OSError:

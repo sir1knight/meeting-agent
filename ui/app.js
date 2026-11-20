@@ -524,6 +524,7 @@ function updCount() {
   const u = UPD.info || {}, g = S.gpu, models = (S.status && S.status.models) || {};
   let n = 0;
   if (u.code_available) n++;
+  if (u.pending) n++;  // скачано и ждёт перезапуска — напоминание
   if (u.platform === "windows" && (u.packages_changed || u.packages_pending)) n++;
   if (IS_WIN && g && g.nvidia && g.outdated) n++;
   n += Object.values(models).filter((m) => m.required && m.status !== "ready" && m.status !== "downloading").length;
@@ -559,7 +560,14 @@ function updWindowHtml() {
 
   // 1. Код и интерфейс
   let code;
-  if (!known) code = updRow("Код и интерфейс", `<span class="muted small">версия ${esc(u.version || "…")}</span>`, "Нажмите «Проверить обновления».");
+  if (u.pending) {
+    const what = u.pending === "bundled" ? "Возврат к версии из приложения" : `Скачана версия ${esc(u.pending)}`;
+    code = updRow("Код и интерфейс", `<span class="badge warn">ждёт перезапуска</span>`,
+      `${what} — применится при следующем запуске приложения. Можно продолжать работать; перезапустите, когда удобно
+       (запись и обработка встреч при этом не должны идти).`,
+      `<span class="row"><button class="primary small" type="button" data-upd="restart"${UPD.busy ? " disabled" : ""}>Перезапустить сейчас</button>
+       <button class="link small" type="button" data-upd="cancel">Отменить</button></span>`);
+  } else if (!known) code = updRow("Код и интерфейс", `<span class="muted small">версия ${esc(u.version || "…")}</span>`, "Нажмите «Проверить обновления».");
   else if (u.code_available && u.shell_needed) code = updRow("Код и интерфейс", '<span class="badge warn">нужно приложение целиком</span>',
     `Версии ${esc(u.latest)} нужна новая оболочка — скачайте приложение целиком со <a href="${esc(u.page)}" target="_blank">страницы проекта</a>.`);
   else if (u.code_available) code = updRow("Код и интерфейс", `<span class="badge warn">${esc(u.version)} → ${esc(u.latest)}</span>`,
@@ -571,8 +579,8 @@ function updWindowHtml() {
   if (u.platform === "windows") {
     const need = u.packages_changed || u.packages_pending;
     out.push(updRow("Пакеты Python", need ? '<span class="badge warn">есть новые</span>' : '<span class="badge ok">актуальны</span>',
-      need ? (u.packages_pending ? "Поставятся при перезапуске приложения (окно консоли, несколько минут)." : "Сначала обновите код — новый список пакетов придёт вместе с ним.") : "",
-      u.packages_pending ? '<button class="ghost small" type="button" data-upd="restart">Перезапустить и обновить</button>' : ""));
+      need ? (u.packages_pending ? "Поставятся при следующем запуске приложения (окно консоли, несколько минут) — когда удобно." : "Сначала скачайте новую версию кода — список пакетов придёт вместе с ней.") : "",
+      u.packages_pending && !u.pending ? '<button class="ghost small" type="button" data-upd="restart">Перезапустить сейчас</button>' : ""));
   }
 
   // 3. Модели
@@ -645,25 +653,51 @@ async function updAction(act) {
     if (IS_WIN) await loadGpu();
     UPD.checking = false; paintUpdWindow();
   } else if (act === "code" || act === "reset") {
-    if (act === "reset" && !confirm("Вернуться к версии, встроенной в приложение? Скачанное обновление удалится.")) return;
+    if (act === "reset" && !confirm("Вернуться к версии, встроенной в приложение? Это применится при следующем перезапуске.")) return;
     await applyCode(act);
+  } else if (act === "cancel") {
+    await api("update/cancel", { method: "POST", body: {} }).catch((e) => toast(e.message));
+    await refreshUpdInfo();
   } else if (act === "restart") {
-    native("restartApp");
+    await restartNow();
   } else if (act === "all") {
     await updateAll();
   }
 }
 
+// Только скачать: новая версия применится при следующем запуске — когда удобно пользователю.
 async function applyCode(act = "code") {
   UPD.busy = "code"; paintUpdWindow();
   try {
     const r = await api(act === "reset" ? "update/reset" : "update/apply", { method: "POST", body: {} });
-    toast(act === "reset" ? "Возвращаюсь к встроенной версии…" : `Обновлено до ${r.version}. Перезапускаю…`, 5000);
-    if (r.packages_pending) toast("Пакеты Python обновятся при следующем запуске приложения", 8000);
-    setTimeout(waitServerAndReload, 3000);
+    toast(act === "reset" ? "Возврат к встроенной версии — при следующем перезапуске"
+      : `Версия ${r.version} скачана. Применится при следующем запуске — или нажмите «Перезапустить сейчас»`, 7000);
   } catch (e) {
-    UPD.error = e.message; UPD.busy = ""; paintUpdWindow();
+    UPD.error = e.message;
   }
+  UPD.busy = "";
+  await refreshUpdInfo();
+}
+
+async function refreshUpdInfo() {
+  try { UPD.info = { ...(UPD.info || {}), ...(await api("update")) }; } catch (_) {}
+  if (UPD.info && UPD.info.latest && UPD.info.pending === UPD.info.latest) UPD.info.code_available = false;
+  paintUpdWindow();
+}
+
+// Перезапуск: на Mac — только сервер (оболочка поднимет его с новым кодом), на Windows — приложение целиком
+// (при запуске ставятся и новые пакеты Python).
+async function restartNow() {
+  try {
+    await api("update/restart", { method: "POST", body: { dry: IS_WIN } });
+  } catch (e) {
+    toast(e.message, 6000);
+    return;
+  }
+  UPD.busy = "restart"; paintUpdWindow();
+  if (IS_WIN) { toast("Перезапускаю Meeting Agent…", 4000); native("restartApp"); return; }
+  toast("Перезапускаю…", 3000);
+  setTimeout(waitServerAndReload, 2500);
 }
 
 // «Обновить всё»: сначала то, что качается в фоне (модели, NVIDIA), потом код — он перезапускает сервер.
@@ -688,11 +722,8 @@ async function updateAll() {
       await new Promise((r) => setTimeout(r, 1000));
     }
     const u = UPD.info || {};
-    if (u.code_available && !u.shell_needed) { await applyCode(); return; }
-    if (u.platform === "windows" && u.packages_pending) {
-      if (confirm("Пакеты Python обновятся при перезапуске. Перезапустить сейчас?")) native("restartApp");
-    }
-    toast("Готово", 3000);
+    if (u.code_available && !u.shell_needed) await applyCode();
+    toast(UPD.info && UPD.info.pending ? "Всё скачано. Новая версия применится при перезапуске — когда будет удобно" : "Готово", 6000);
   } finally {
     if (UPD.busy === "all") UPD.busy = "";
     paintUpdWindow();

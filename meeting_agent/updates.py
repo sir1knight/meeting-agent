@@ -116,6 +116,9 @@ def _get(url: str, quick: bool = False, **kw):
             continue
         if r.status_code == 200:
             return r
+        if r.status_code in (400, 404) and "not found" in r.text.lower():
+            raise RuntimeError("На GitVerse пока нет сведений об обновлениях (version.json) — "
+                               "их опубликует автор вместе с новой версией")
         last = r.status_code
         if r.status_code not in (429, 500, 502, 503, 504):
             break
@@ -143,14 +146,24 @@ def remote_manifest(max_age_hours: float = 0) -> dict:
 
 # ---------- что можно обновить ----------
 
+def pending() -> str | None:
+    """Скачанная версия, которая станет текущей при перезапуске («bundled» — откат к встроенной)."""
+    try:
+        return (overlay_dir() / "pending.txt").read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def status() -> dict:
     """Без обращения к сети: что установлено сейчас."""
     running = _manifest(config.ROOT)
     bundled = _manifest(bundled_root())
+    p = pending()
+    root_next = overlay_dir() / p if p and p != "bundled" else None
     return {"platform": platform(), "version": running.get("app", "1.0.0"),
             "bundled": bundled.get("app", "1.0.0"), "shell": shell_version(),
-            "overlay": config.ROOT.resolve() != bundled_root().resolve(),
-            "packages_pending": packages_needed(), "page": PAGE}
+            "overlay": config.ROOT.resolve() != bundled_root().resolve(), "pending": p,
+            "packages_pending": packages_needed(root_next) if root_next else packages_needed(), "page": PAGE}
 
 
 def check(max_age_hours: float = 0) -> dict:
@@ -159,7 +172,7 @@ def check(max_age_hours: float = 0) -> dict:
     latest = m.get("app", "0")
     need_shell = (m.get("shell") or {}).get(platform(), 1)
     st.update(latest=latest, notes=m.get("notes", ""),
-              code_available=_vt(latest) > _vt(st["version"]),
+              code_available=_vt(latest) > _vt(st["version"]) and latest != st["pending"],
               shell_needed=need_shell > st["shell"], shell_latest=need_shell)
     if osutil.IS_WIN:
         want = (m.get("packages") or {}).get("windows_hash", "")
@@ -208,15 +221,24 @@ def apply_code() -> dict:
     final = base / got
     shutil.rmtree(final, ignore_errors=True)
     tmp.rename(final)
-    (base / "current.txt").write_text(got, encoding="utf-8")
-    for old in base.iterdir():  # прошлые версии больше не нужны
-        if old.is_dir() and old.name not in (got,) and not old.name.startswith("."):
+    # Не сразу: станет текущей при следующем запуске сервера/приложения (__main__._promote).
+    (base / "pending.txt").write_text(got, encoding="utf-8")
+    try:
+        current = (base / "current.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        current = ""
+    for old in base.iterdir():  # прошлые версии больше не нужны (кроме работающей сейчас)
+        if old.is_dir() and old.name not in (got, current) and not old.name.startswith("."):
             shutil.rmtree(old, ignore_errors=True)
-    log.info("Код обновлён до %s", got)
+    log.info("Скачана версия %s — применится при перезапуске", got)
     return {"version": got, "packages_pending": packages_needed(final)}
 
 
 def reset_code() -> None:
-    """Вернуться к версии, встроенной в приложение."""
-    (overlay_dir() / "current.txt").unlink(missing_ok=True)
-    shutil.rmtree(overlay_dir(), ignore_errors=True)
+    """Вернуться к версии, встроенной в приложение — при следующем перезапуске."""
+    overlay_dir().mkdir(parents=True, exist_ok=True)
+    (overlay_dir() / "pending.txt").write_text("bundled", encoding="utf-8")
+
+
+def cancel_pending() -> None:
+    (overlay_dir() / "pending.txt").unlink(missing_ok=True)

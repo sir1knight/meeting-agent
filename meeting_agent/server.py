@@ -820,20 +820,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_post_update_apply(self, q):
         from . import updates
-        if any(j["status"] == "running" for j in self.state.jobs.snapshot()):
-            raise ValueError("Дождитесь, пока закончится обработка встречи")
-        if self.state.recording.get("state") == "recording" and osutil.IS_WIN:
-            raise ValueError("Дождитесь конца записи")
-        r = updates.apply_code()
-        self._json(r)
-        # Перезапуск сервера: оболочка (Swift / Meeting Agent.exe) сама поднимет его — уже с новым кодом.
-        threading.Timer(1.5, lambda: os._exit(0)).start()
+        self._json(updates.apply_code())  # только скачать: применится при перезапуске
 
     def api_post_update_reset(self, q):
         from . import updates
         updates.reset_code()
         self._json({"ok": True})
-        threading.Timer(1.5, lambda: os._exit(0)).start()
+
+    def api_post_update_cancel(self, q):
+        from . import updates
+        updates.cancel_pending()
+        self._json({"ok": True})
+
+    def api_post_update_restart(self, q):
+        """Перезапуск сервера, чтобы скачанная версия применилась (оболочка поднимет его сама)."""
+        if any(j["status"] == "running" for j in self.state.jobs.snapshot()):
+            raise ValueError("Сейчас обрабатывается встреча — перезапустите после окончания")
+        if self.state.recording.get("state") == "recording":
+            raise ValueError("Идёт запись — перезапустите после её окончания")
+        self._json({"ok": True})
+        if not self._data().get("dry"):  # dry — только проверить (Windows перезапускает приложение целиком)
+            threading.Timer(1.0, lambda: os._exit(0)).start()
 
     def api_get_gemini_models(self, q):
         from .summarize import gemini_models
