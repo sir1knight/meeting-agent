@@ -249,6 +249,17 @@ def _gemini_model(name):
     return gemini_model(name)
 
 
+def _with_model(cfg: dict, d: dict) -> dict:
+    """Разовая замена модели из окна: «повторить на модели полегче» или «на Qwen на этом компьютере»."""
+    b = d.get("backend")
+    if b not in BACKENDS:
+        return cfg
+    ask = dict(cfg.get("ask", {}), backend=b)
+    if b == "gemini" and d.get("gemini_model"):
+        ask["gemini_model"] = _gemini_model(str(d["gemini_model"]))
+    return dict(cfg, ask=ask)
+
+
 def _template_backend(cfg: dict) -> str | None:
     from .templates import cloud_backend
 
@@ -705,6 +716,7 @@ class Handler(BaseHTTPRequestHandler):
         """{"id", "request"} — документ по встрече под адресата («письмо коллегам», «для CEO»…)."""
         d = self._data()
         cfg, note, src = self._note_work(d)
+        cfg = _with_model(cfg, d)
         info = _note_info(note, full=True)
         v = versions.create(src, info["title"], info["date"], info["summary"], info["transcript"],
                             str(d.get("request", "")), cfg)
@@ -887,6 +899,7 @@ class Handler(BaseHTTPRequestHandler):
         cfg = config.load()
         info = _note_info(_note_path(cfg, str(d.get("id", ""))), full=True)
         history = [h for h in d.get("history", []) if isinstance(h, dict) and h.get("q")][-3:]
+        cfg = _with_model(cfg, d)
         self._json(meeting_ask(info["title"], info["date"], info["summary"], info["transcript"],
                                str(d.get("question", "")), history, cfg))
 

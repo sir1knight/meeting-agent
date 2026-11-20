@@ -164,6 +164,14 @@ def chat_claude(cfg: dict, user: str, system: str = SYSTEM) -> str:
         raise RuntimeError(f"Claude API отказал в доступе: {e.message}") from e
     except anthropic.APIConnectionError as e:
         raise RuntimeError("Нет связи с Claude API: проверьте интернет") from e
+    except anthropic.RateLimitError as e:
+        raise RuntimeError("Исчерпан лимит Claude API — попробуйте через пару минут "
+                           "или проверьте лимиты в console.anthropic.com") from e
+    except anthropic.APIStatusError as e:
+        if e.status_code >= 500:  # 529 — перегрузка, 5xx — сбой у Anthropic (SDK уже повторил запрос)
+            raise RuntimeError(f"Claude API сейчас перегружен (ответ Anthropic {e.status_code}) — это на стороне "
+                               "Anthropic. Попробуйте через пару минут.") from e
+        raise RuntimeError(f"Claude API ответил ошибкой {e.status_code}: {e.message}") from e
     if resp.stop_reason == "refusal":
         raise RuntimeError("Claude отказался составлять протокол по этой расшифровке")
     if resp.stop_reason == "max_tokens":
@@ -282,7 +290,9 @@ def gemini_models() -> list[dict]:
         raise RuntimeError("Нет связи с Gemini API: проверьте интернет") from e
     if r.status_code in (400, 401, 403):
         raise RuntimeError(f"Gemini API отказал: {_api_error(r)}")
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise RuntimeError(f"Не удалось получить список моделей Gemini (ответ Google {r.status_code}) — "
+                           "попробуйте через пару минут")
     out = []
     for m in r.json().get("models", []):
         name = m["name"].removeprefix("models/")
@@ -451,13 +461,26 @@ def chat_openai(cfg: dict, user: str, system: str = SYSTEM) -> str:
         if r.status_code == 404:  # модель убрали или нет к ней доступа — берём актуальную
             model = body["model"] = _pick_openai_model(headers)
             r = _http("POST", f"{OPENAI}/chat/completions", headers=headers, json=body, timeout=1800)
+        for wait in (4, 12):  # 5xx — сбой или перегрузка у OpenAI: повторяем
+            if r.status_code not in GEMINI_BUSY:
+                break
+            log.warning("OpenAI ответил %s, повтор через %d с…", r.status_code, wait)
+            time.sleep(wait)
+            r = _http("POST", f"{OPENAI}/chat/completions", headers=headers, json=body, timeout=1800)
     except requests.RequestException as e:
         raise RuntimeError("Нет связи с OpenAI API: проверьте интернет") from e
     if r.status_code == 401:
         raise RuntimeError("OpenAI API не принял ключ: проверьте его в настройках")
-    if r.status_code in (400, 403, 429):
+    if r.status_code == 429:
+        raise RuntimeError(f"Исчерпан лимит OpenAI API или сервис перегружен — попробуйте через пару минут. "
+                           f"Ответ OpenAI: {_api_error(r)[:200]}")
+    if r.status_code in (400, 403):
         raise RuntimeError(f"OpenAI API отказал: {_api_error(r)}")
-    r.raise_for_status()
+    if r.status_code in GEMINI_BUSY:
+        raise RuntimeError(f"OpenAI API сейчас перегружен (ответ {r.status_code}) — это на стороне OpenAI. "
+                           "Попробуйте через пару минут.")
+    if r.status_code >= 400:
+        raise RuntimeError(f"OpenAI API ответил ошибкой {r.status_code}: {_api_error(r)[:200]}")
     _openai_models[wanted] = model
     try:
         choice = r.json()["choices"][0]

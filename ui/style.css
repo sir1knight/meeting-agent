@@ -442,3 +442,7 @@ dialog .check { font-weight: 400; }
 .perm-banner { margin: 0 14px 10px; padding: 8px 10px; border-radius: 10px; font-size: 12.5px;
   background: color-mix(in srgb, var(--warn) 14%, transparent); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); }
 .perm-row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; margin-top: 4px; }
+
+/* облачная модель не ответила — повторить на другой */
+.fallback { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.fallback .ghost { color: var(--text); }

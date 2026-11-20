@@ -395,7 +395,7 @@ function renderMeeting() {
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === S.tab));
   const stale = m.protocol_error
     ? `<div class="stale">Протокол не составлен: ${esc(m.protocol_error.slice(0, 200))}. Расшифровка сохранена.
-       <button class="ghost" id="staleRedo">Составить протокол</button></div>`
+       <button class="ghost" id="staleRedo">Составить протокол</button>${protocolFallbackHtml(m)}</div>`
     : m.protocol_stale
     ? `<div class="stale">Разметка собеседников изменена — протокол составлен по старой.
        <button class="ghost" id="staleRedo">Пересоздать протокол</button></div>` : "";
@@ -415,7 +415,8 @@ function renderMeeting() {
       : transcriptHtml(m.transcript);
     highlightPlaying(true);
   }
-  if ($("staleRedo")) $("staleRedo").onclick = redoProtocol;
+  if ($("staleRedo")) $("staleRedo").onclick = () => redoProtocol();
+  if ($("staleQwen")) $("staleQwen").onclick = () => redoProtocol("local");
   $("redoBtn").disabled = !m.source;
   renderSpeakers();
   if (S.tab === "summary") linkContacts($("mBody"));
@@ -487,7 +488,7 @@ function meetingChatHtml(m) {
     <div class="quick">${QUICK.map(([t], i) => `<button class="ghost small" type="button" data-quick="${i}">${esc(t)}</button>`).join("")}</div>
     ${log.map((h, i) => `<div class="q">${esc(h.q)}</div>` + (h.pending
       ? '<div class="a muted"><span class="spinner"></span> Читаю встречу и пишу ответ…</div>'
-      : h.error ? `<div class="a err">${esc(h.error)}</div>`
+      : h.error ? `<div class="a err">${esc(h.error)}${fallbackHtml(h.error, "chat", i)}</div>`
       : `<div class="a md"><button class="ghost small copy-a" type="button" data-copy-a="${i}">Копировать</button>${linkTimes(markdown(h.a), m.can_play)}</div>`)).join("")}
     <form class="ask-form" id="mcForm">
       <textarea id="mcInput" rows="2" placeholder="Например: что решили по срокам? Кто отвечает за API?"></textarea>
@@ -496,7 +497,27 @@ function meetingChatHtml(m) {
     ${log.length ? '<button class="link small" type="button" id="mcClear">Начать заново</button>' : ""}</div>`;
 }
 
-async function sendMeetingAsk(q) {
+// Облачная модель не ответила (перегрузка, лимит, нет связи) — предложить модель полегче или Qwen на компьютере.
+const GEMINI_LIGHT = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
+function fallbackOptions(err) {
+  if (!/перегруж|лимит|429|50[0234]|Нет связи|timed out|timeout|не ответил/i.test(err || "")) return [];
+  const st = S.settings || {}, b = st.ask_backend || "local", opts = [];
+  if (b === "gemini") {
+    const cur = st.ask_gemini_model || st.gemini_model || "";
+    const light = GEMINI_LIGHT.find((x) => x !== cur);
+    if (light) opts.push({ label: `Повторить на ${light}`, backend: "gemini", gemini_model: light });
+  }
+  const qwen = S.status && S.status.models && S.status.models.llm && S.status.models.llm.status === "ready";
+  if (b !== "local" && qwen) opts.push({ label: `Повторить на Qwen (на ${PC}, без интернета)`, backend: "local" });
+  return opts;
+}
+function fallbackHtml(err, kind, idx) {
+  const opts = fallbackOptions(err);
+  return opts.length ? `<div class="fallback">${opts.map((o, j) =>
+    `<button class="ghost small" type="button" data-fb="${kind}" data-fb-i="${idx}" data-fb-o="${j}">${esc(o.label)}</button>`).join("")}</div>` : "";
+}
+
+async function sendMeetingAsk(q, override = null) {
   const m = S.current;
   if (!m || !q.trim()) return;
   const log = MCHAT.log[m.id] = MCHAT.log[m.id] || [];
@@ -506,7 +527,7 @@ async function sendMeetingAsk(q) {
   if (S.tab === "chat") renderMeeting();
   try {
     const history = log.filter((h) => h.a).slice(-3).map((h) => ({ q: h.q, a: h.a }));
-    const r = await api("meeting_ask", { method: "POST", body: { id: m.id, question: item.q, history } });
+    const r = await api("meeting_ask", { method: "POST", body: { id: m.id, question: item.q, history, ...(override || {}) } });
     item.a = r.answer;
   } catch (e) {
     item.error = e.message;
@@ -1035,9 +1056,18 @@ $("assignDialog").addEventListener("close", async () => {
   }
 });
 
-async function redoProtocol() {
+// Облачная модель не составила протокол (перегрузка, лимит, нет связи) — составить на Qwen на компьютере.
+function protocolFallbackHtml(m) {
+  const qwen = S.status && S.status.models && S.status.models.llm && S.status.models.llm.status === "ready";
+  const cloud = m.llm && m.llm !== "local";
+  return qwen && cloud && /перегруж|лимит|429|50[0234]|Нет связи|timed out|timeout|не ответил/i.test(m.protocol_error || "")
+    ? ` <button class="ghost" id="staleQwen" title="Ничего не уходит в интернет">Составить на Qwen (на ${PC})</button>` : "";
+}
+
+async function redoProtocol(llm) {
   try {
-    await api("reprocess", { method: "POST", body: { id: S.current.id, template: S.current.template || undefined } });
+    await api("reprocess", { method: "POST", body: { id: S.current.id, template: S.current.template || undefined,
+                                                     llm: typeof llm === "string" ? llm : undefined } });
     toast("Протокол пересоздаётся — это видно в списке слева");
     pollStatus();
   } catch (e) {
@@ -2339,7 +2369,7 @@ async function undoEdit() {
 }
 
 // Версии протокола под адресата: «письмо коллегам», «для CEO»…
-const VER = { sel: {}, pending: {}, draft: {} };
+const VER = { sel: {}, pending: {}, draft: {}, error: {} };
 function currentVersion(m) {
   const id = m && VER.sel[m.id];
   return id && id !== "new" ? (m.versions || []).find((v) => v.id === id) || null : null;
@@ -2365,6 +2395,7 @@ function versionBodyHtml(m) {
       <div class="quick">${ex.map((x) => `<button class="ghost small" type="button" data-ver-ex="${esc(x)}">${esc(x)}</button>`).join("")}</div>
       <textarea id="verInput" rows="3" placeholder="Например: протокол для CEO — на полстраницы, начни с вывода, что нужно от него; без технических деталей">${esc(VER.draft[m.id] || "")}</textarea>
       <button class="primary" type="submit"${VER.pending[m.id] ? " disabled" : ""}>Составить</button>
+      ${VER.error[m.id] && fallbackOptions(VER.error[m.id]).length ? `<div class="a err">${esc(VER.error[m.id])}${fallbackHtml(VER.error[m.id], "ver", 0)}</div>` : ""}
     </form>`;
   }
   const v = currentVersion(m);
@@ -2373,18 +2404,20 @@ function versionBodyHtml(m) {
     <button class="link small" type="button" data-ver-del="${esc(v.id)}">Удалить версию</button></div>
     ${linkTimes(markdown(v.text), m.can_play)}`;
 }
-async function createVersion(request) {
+async function createVersion(request, override = null) {
   const m = S.current;
   if (!request.trim() || VER.pending[m.id]) return;
+  delete VER.error[m.id];
   VER.pending[m.id] = request;
   VER.draft[m.id] = "";
   VER.sel[m.id] = "";
   renderMeeting();
   try {
-    const r = await api("meeting/version", { method: "POST", body: { id: m.id, request } });
+    const r = await api("meeting/version", { method: "POST", body: { id: m.id, request, ...(override || {}) } });
     if (S.current && S.current.id === m.id) { S.current = r.meeting; VER.sel[m.id] = r.version.id; }
   } catch (e) {
-    toast(e.message, 6000);
+    if (!fallbackOptions(e.message).length) toast(e.message, 6000);
+    VER.error[m.id] = e.message;
     VER.draft[m.id] = request;
     VER.sel[m.id] = "new";
   }
@@ -2421,6 +2454,22 @@ $("mBody").addEventListener("click", async (e) => {
       VER.sel[S.current.id] = "";
       renderMeeting();
     } catch (err) { toast(err.message); }
+  }
+});
+$("mBody").addEventListener("click", (e) => {
+  const fb = e.target.closest("[data-fb]");
+  if (!fb || !S.current) return;
+  const m = S.current;
+  if (fb.dataset.fb === "chat") {
+    const log = MCHAT.log[m.id] || [];
+    const item = log[+fb.dataset.fbI];
+    if (!item) return;
+    const opt = fallbackOptions(item.error)[+fb.dataset.fbO];
+    log.splice(+fb.dataset.fbI, 1);
+    sendMeetingAsk(item.q, opt);
+  } else {
+    const opt = fallbackOptions(VER.error[m.id])[+fb.dataset.fbO];
+    createVersion(VER.draft[m.id] || "", opt);
   }
 });
 $("mBody").addEventListener("change", (e) => {
