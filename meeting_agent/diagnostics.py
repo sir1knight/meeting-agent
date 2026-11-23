@@ -53,17 +53,22 @@ def _audio_devices() -> str:
             pass
         return "(system_profiler unavailable)"
     try:
-        import soundcard as sc
+        from . import winrec
 
-        lines = ["Speakers:"]
-        for s in sc.all_speakers():
-            lines.append(f"  - {s.name}")
-        lines.append("Microphones:")
-        for m in sc.all_microphones(include_loopback=False):
-            lines.append(f"  - {m.name}")
-        return scrub("\n".join(lines))
+        sc = winrec.soundcard()
+        inited = winrec._com_init()
+        try:
+            lines = ["Speakers:"]
+            for s in sc.all_speakers():
+                lines.append(f"  - {s.name}")
+            lines.append("Microphones:")
+            for m in sc.all_microphones(include_loopback=False):
+                lines.append(f"  - {m.name}")
+            return scrub("\n".join(lines))
+        finally:
+            winrec._com_done(inited)
     except Exception as e:  # noqa: BLE001
-        return f"(soundcard error: {e})"
+        return f"(soundcard error: {type(e).__name__}: {e})"
 
 
 def _safe_settings(cfg: dict) -> dict:

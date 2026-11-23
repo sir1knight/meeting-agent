@@ -81,6 +81,180 @@ def _com_done(inited: bool) -> None:
         ctypes.windll.ole32.CoUninitialize()
 
 
+def _err_text(e: BaseException) -> str:
+    """Читаемый текст ошибки (включая исключения вроде голого AssertionError без сообщения)."""
+    msg = str(e).strip()
+    return f"{type(e).__name__}: {msg}" if msg else type(e).__name__
+
+
+def _pack_wfext(sr: int, ch: int, mask: int) -> bytes:
+    """Упакованная (#pragma pack(1), 40 байт) структура WAVEFORMATEXTENSIBLE (IEEE float32)."""
+    return struct.pack(
+        "<HHIIHHHHIIHH8s",
+        0xFFFE, ch, sr, sr * ch * 4, ch * 4, 32, 22,
+        32, mask,
+        0x00000003, 0x0000, 0x0010, b"\x80\x00\x00\xaa\x00\x38\x9b\x71",
+    )
+
+
+def _pack_wf_float(sr: int, ch: int) -> bytes:
+    """Упакованная (18 байт) структура WAVEFORMATEX (WAVE_FORMAT_IEEE_FLOAT, cbSize=0)."""
+    return struct.pack("<HHIIHHH", 0x0003, ch, sr, sr * ch * 4, ch * 4, 32, 0)
+
+
+def _patch_soundcard_mf(sc_mod) -> None:
+    """Патчит два бага soundcard 0.4.6 на Windows (mediafoundation.py):
+    1) _AudioClient.__init__ жёстко требует wFormatTag==0xFFFE и cbSize==22 и падает с AssertionError
+       на USB-микрофонах с WAVE_FORMAT_IEEE_FLOAT (0x0003, cbSize=0, например GM7); кроме того,
+       в CFFI-заголовке soundcard не указан #pragma pack(1) для WAVEFORMATEXTENSIBLE.
+       Собираем собственный упакованный 40-байтный WAVEFORMATEXTENSIBLE (с fallback на 18-байтный
+       WAVEFORMATEX IEEE_FLOAT) — WASAPI сам конвертирует формат благодаря AUTOCONVERTPCM.
+    2) _Device.channels делает assert cbSize == 40, хотя читает только nChannels (первые 4 байта)."""
+    import collections.abc
+
+    mf = getattr(sc_mod, "mediafoundation", None)
+    if mf is None or getattr(mf, "_meeting_agent_patched", False):
+        return
+
+    _ffi = mf._ffi
+    _ole32 = mf._ole32
+    _com = mf._com
+
+    def _patched_init(self, ptr, samplerate, channels, blocksize, isloopback, exclusive_mode=False):
+        self._ptr = ptr
+        if isinstance(channels, int):
+            self.channelmap = list(range(channels))
+        elif isinstance(channels, collections.abc.Iterable):
+            self.channelmap = list(channels)
+        else:
+            raise TypeError("channels must be iterable or integer")
+
+        if list(range(len(set(self.channelmap)))) != sorted(list(set(self.channelmap))):
+            raise TypeError("Due to limitations of WASAPI, channel maps on Windows "
+                            "must be a combination of `range(0, x)`.")
+
+        if blocksize is None:
+            blocksize = self.deviceperiod[0] * samplerate
+
+        n_channels = len(set(self.channelmap))
+        sr = int(samplerate)
+
+        # Аккуратно подсматриваем dwChannelMask из GetMixFormat, если устройство отдало EXTENSIBLE.
+        mix_mask = None
+        ppMixFormat = _ffi.new("WAVEFORMATEXTENSIBLE**")
+        hr_mix = self._ptr[0][0].lpVtbl.GetMixFormat(self._ptr[0], ppMixFormat)
+        if hr_mix == 0 and ppMixFormat[0] != _ffi.NULL:
+            try:
+                raw18 = bytes(_ffi.buffer(ppMixFormat[0], 18))
+                tag, mix_ch, _, _, _, _, cb = struct.unpack("<HHIIHHH", raw18)
+                if tag == 0xFFFE and cb >= 22 and mix_ch == n_channels:
+                    raw40 = bytes(_ffi.buffer(ppMixFormat[0], 40))
+                    mix_mask = struct.unpack_from("<I", raw40, 20)[0]
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                _ole32.CoTaskMemFree(ppMixFormat[0])
+
+        default_mask = {1: 0x4, 2: 0x3}.get(n_channels, 0)
+        mask = mix_mask if mix_mask is not None else default_mask
+        sharemode = _ole32.AUDCLNT_SHAREMODE_EXCLUSIVE if exclusive_mode else _ole32.AUDCLNT_SHAREMODE_SHARED
+        #             resample   | remix      | better-SRC | nopersist
+        streamflags = 0x00100000 | 0x80000000 | 0x08000000 | 0x00080000
+        if isloopback:
+            streamflags |= 0x00020000
+        bufferduration = int(blocksize / samplerate * 10000000)
+
+        candidates = [_pack_wfext(sr, n_channels, mask)]
+        if mask != 0:
+            candidates.append(_pack_wfext(sr, n_channels, 0))
+        candidates.append(_pack_wf_float(sr, n_channels))
+
+        hr = -1
+        for raw_fmt in candidates:
+            buf = _ffi.new("unsigned char[]", raw_fmt)
+            fmt_ptr = _ffi.cast("WAVEFORMATEXTENSIBLE*", buf)
+            hr = self._ptr[0][0].lpVtbl.Initialize(
+                self._ptr[0], sharemode, streamflags, bufferduration, 0, fmt_ptr, _ffi.NULL
+            )
+            if hr == 0:
+                break
+        _com.check_error(hr)
+        self.samplerate = samplerate
+        self._idle_start_time = None
+
+    mf._AudioClient.__init__ = _patched_init
+
+    # Патч _Device.channels: допускаем cbSize >= 18 (WAVEFORMATEX 18B и WAVEFORMATEXTENSIBLE 40B).
+    _orig_channels = mf._Device.channels.fget
+
+    def _patched_channels(self):
+        try:
+            return _orig_channels(self)
+        except AssertionError:
+            ppPropertyStore = _ffi.new("IPropertyStore **")
+            ptr = self._device_ptr()
+            hr = ptr[0][0].lpVtbl.OpenPropertyStore(ptr[0], 0, ppPropertyStore)
+            _com.release(ptr)
+            _com.check_error(hr)
+            propvariant = mf._PropVariant()
+            pkey = _ffi.new("PROPERTYKEY *", [
+                [0xf19f064d, 0x82c, 0x4e27, [0xbc, 0x73, 0x68, 0x82, 0xa1, 0xbb, 0x8e, 0x4c]], 0
+            ])
+            hr = ppPropertyStore[0][0].lpVtbl.GetValue(ppPropertyStore[0], pkey, propvariant.ptr)
+            _com.release(ppPropertyStore)
+            _com.check_error(hr)
+            if propvariant.ptr[0].vt != 65:
+                return 1
+            blob = _ffi.cast("BLOB_PROPVARIANT *", propvariant.ptr)[0].blob
+            if blob.cbSize >= 18 and blob.pBlobData != _ffi.NULL:
+                wf = _ffi.cast("WAVEFORMATEX *", blob.pBlobData)
+                return int(wf[0].nChannels) or 1
+            return 1
+
+    mf._Device.channels = property(_patched_channels)
+    mf._meeting_agent_patched = True
+
+
+_SC = None
+_SC_LOCK = threading.Lock()
+
+
+def soundcard():
+    """Потокобезопасный импорт soundcard: первый импорт выполняется в чистом потоке без COM,
+    чтобы soundcard/mediafoundation._COMLibrary не падал с Error 0x100000001 (S_FALSE)
+    из-за ранее вызванного CoInitializeEx в рабочем потоке."""
+    global _SC
+    if _SC is not None:
+        return _SC
+    with _SC_LOCK:
+        if _SC is not None:
+            return _SC
+        from . import osutil
+
+        box: dict = {}
+
+        def _imp() -> None:
+            try:
+                import soundcard as m
+                if osutil.IS_WIN:
+                    _patch_soundcard_mf(m)
+                    mf = getattr(m, "mediafoundation", None)
+                    if mf is not None and getattr(getattr(mf, "_com", None), "com_loaded", False):
+                        mf._com.com_loaded = False
+                        mf._ole32.CoUninitialize()
+                box["m"] = m
+            except BaseException as e:  # noqa: BLE001
+                box["e"] = e
+
+        th = threading.Thread(target=_imp, daemon=True, name="soundcard-init")
+        th.start()
+        th.join()
+        if "e" in box:
+            raise box["e"]
+        _SC = box["m"]
+        return _SC
+
+
 def _mmcss_enter():
     """Поднимает приоритет потока захвата через Windows MMCSS, чтобы локальный ASR не рвал буферы WASAPI."""
     try:
@@ -233,8 +407,7 @@ class MeetingRecorder:
         return self._speaker_muted
 
     def _resolve_mic(self):
-        import soundcard as sc
-
+        sc = soundcard()
         if self.mic_id:
             try:
                 m = sc.get_microphone(self.mic_id)
@@ -247,8 +420,7 @@ class MeetingRecorder:
         return m
 
     def _resolve_speaker(self):
-        import soundcard as sc
-
+        sc = soundcard()
         if self.speaker_id:
             try:
                 sp = sc.get_speaker(self.speaker_id)
@@ -259,8 +431,7 @@ class MeetingRecorder:
         return sc.default_speaker()
 
     def _open_loopback(self):
-        import soundcard as sc
-
+        sc = soundcard()
         sp = self._resolve_speaker()
         self.speaker_id = sp.id
         return sc.get_microphone(sp.id, include_loopback=True)
@@ -270,7 +441,8 @@ class MeetingRecorder:
 
         from . import detect, osutil
 
-        _com_init()  # запись начинают из потока слежения за встречами или из меню трея
+        sc = soundcard()  # до _com_init(): первый импорт в чистом потоке без COM
+        _com_init()       # запись начинают из потока слежения за встречами или из меню трея
         self.folder.mkdir(parents=True, exist_ok=True)
         free_bytes = shutil.disk_usage(self.folder).free
         if free_bytes < 500 * 1024 * 1024:
@@ -279,14 +451,8 @@ class MeetingRecorder:
         self._started_wall = time.time()
         self._started_mono = time.monotonic()
         self._last_checkpoint = self._started_mono
-        from .recovery import write_lock
 
-        write_lock(self.folder, "mic_only" if self.mic_only else self.source)
-        self.mic_id = detect.meeting_capture_device_id("mic_only" if self.mic_only else self.source)
-        mic = Track("mic", WavWriter(self.folder / "mic.wav", RATE), self._resolve_mic,
-                    pad_by_clock=False, paused_event=self.paused_event)
         if self.mic_only:
-            self.tracks = [mic]
             speaker_name = "не используется (только микрофон)"
         else:
             self.speaker_id = detect.meeting_render_device_id(self.source)
@@ -295,8 +461,29 @@ class MeetingRecorder:
                 self.speaker_id = speaker.id
                 speaker_name = speaker.name
             except Exception as e:
-                raise RuntimeError(f"Нет устройства вывода звука ({e}): подключите динамики или наушники "
-                                   "и выберите их в Параметрах Windows → Система → Звук") from e
+                no_speakers = False
+                try:
+                    no_speakers = len(sc.all_speakers()) == 0
+                except Exception:
+                    pass
+                if no_speakers:
+                    raise RuntimeError(f"Нет устройства вывода звука ({_err_text(e)}): подключите динамики "
+                                       "или наушники и выберите их в Параметрах Windows → Система → Звук") from e
+                raise RuntimeError(f"Не удалось открыть устройство вывода звука ({_err_text(e)})") from e
+
+        from .recovery import write_lock
+
+        write_lock(self.folder, "mic_only" if self.mic_only else self.source)
+        self.mic_id = detect.meeting_capture_device_id("mic_only" if self.mic_only else self.source)
+        try:
+            mic_name = self._resolve_mic().name
+        except Exception:
+            mic_name = "?"
+        mic = Track("mic", WavWriter(self.folder / "mic.wav", RATE), self._resolve_mic,
+                    pad_by_clock=False, paused_event=self.paused_event)
+        if self.mic_only:
+            self.tracks = [mic]
+        else:
             others = Track("others", WavWriter(self.folder / "others.wav", RATE), self._open_loopback,
                            pad_by_clock=True, paused_event=self.paused_event)
             self.keeper = SilenceKeeper(self._resolve_speaker)
@@ -308,18 +495,14 @@ class MeetingRecorder:
             t.ready.wait(10)
         if mic.error:
             self.stop()
-            raise RuntimeError(f"Микрофон недоступен: {mic.error}. {mic_access_hint()}")
+            raise RuntimeError(f"Микрофон «{mic_name}» недоступен ({_err_text(mic.error)}). {mic_access_hint()}")
         if not self.mic_only and len(self.tracks) > 1 and self.tracks[1].error:
             self.stop()
-            raise RuntimeError(f"Не удалось записывать звук компьютера: {self.tracks[1].error}")
+            raise RuntimeError(f"Не удалось записывать звук компьютера ({_err_text(self.tracks[1].error)})")
         osutil.prevent_sleep(True)
         if not self.mic_only:
             self.poll_speaker_mute()
         self.write_meta(in_progress=True)
-        try:
-            mic_name = self._resolve_mic().name
-        except Exception:
-            mic_name = "?"
         log.info("Запись: микрофон «%s», звук компьютера: %s", mic_name, speaker_name)
 
     def pause(self) -> None:

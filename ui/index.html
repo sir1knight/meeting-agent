@@ -111,8 +111,8 @@
     <label class="check"><input type="checkbox" id="redoRetranscribe"> Заново расшифровать аудио (дольше)</label>
     <label id="redoAsrRow" hidden>Чем распознавать <select id="redoAsr"></select></label>
     <div class="dlg-actions">
-      <button value="cancel" class="ghost">Отмена</button>
-      <button value="ok" class="primary">Пересоздать</button>
+      <button type="button" value="cancel" class="ghost">Отмена</button>
+      <button type="submit" value="ok" class="primary">Пересоздать</button>
     </div>
   </form>
 </dialog>
@@ -144,8 +144,8 @@
     <label class="check"><input type="checkbox" id="rplGloss"> Добавить новое написание в словарь распознавания <span class="muted small">— чтобы в следующих встречах его слышали правильно</span></label>
     <div id="rplCount" class="muted small"></div>
     <div class="dlg-actions">
-      <button value="cancel" class="ghost">Отмена</button>
-      <button value="ok" class="primary" id="rplGo">Заменить</button>
+      <button type="button" value="cancel" class="ghost">Отмена</button>
+      <button type="submit" value="ok" class="primary" id="rplGo">Заменить</button>
     </div>
   </form>
 </dialog>
@@ -161,8 +161,8 @@
     <label class="check" id="exportTrRow"><input type="checkbox" id="exportTr"> Вместе с расшифровкой</label>
     <p class="muted small">Файл сохранится в папку «Загрузки».</p>
     <div class="dlg-actions">
-      <button value="cancel" class="ghost">Отмена</button>
-      <button value="ok" class="primary">Скачать</button>
+      <button type="button" value="cancel" class="ghost">Отмена</button>
+      <button type="submit" value="ok" class="primary">Скачать</button>
     </div>
   </form>
 </dialog>
@@ -203,8 +203,8 @@
       <p class="muted small">Первой строкой ответа модель должна писать «TITLE: название» — из неё берётся заголовок заметки (если строки нет, приложение добавит это указание само).</p>
     </div>
     <div class="dlg-actions">
-      <button value="cancel" class="ghost">Отмена</button>
-      <button value="ok" class="primary">Сохранить</button>
+      <button type="button" value="cancel" class="ghost">Отмена</button>
+      <button type="submit" value="ok" class="primary">Сохранить</button>
     </div>
   </form>
 </dialog>
@@ -215,8 +215,8 @@
     <p id="deleteText"></p>
     <label class="check"><input type="checkbox" id="deleteAudio" checked> Удалить и аудиозапись</label>
     <div class="dlg-actions">
-      <button value="cancel" class="ghost">Отмена</button>
-      <button value="ok" class="primary danger-bg">Удалить</button>
+      <button type="button" value="cancel" class="ghost">Отмена</button>
+      <button type="submit" value="ok" class="primary danger-bg">Удалить</button>
     </div>
   </form>
 </dialog>
@@ -230,10 +230,10 @@
     <label class="check"><input type="checkbox" id="renameRemember" checked> Запомнить голос</label>
     <p id="renameRememberHint" class="muted small"></p>
     <div class="dlg-actions">
-      <button value="reset" class="ghost" id="renameReset">Сбросить имя</button>
+      <button type="button" value="reset" class="ghost" id="renameReset">Сбросить имя</button>
       <span class="spacer"></span>
-      <button value="cancel" class="ghost">Отмена</button>
-      <button value="ok" class="primary">Сохранить</button>
+      <button type="button" value="cancel" class="ghost">Отмена</button>
+      <button type="submit" value="ok" class="primary">Сохранить</button>
     </div>
   </form>
 </dialog>
@@ -243,7 +243,7 @@
     <h2>Заменить образец голоса</h2>
     <p class="muted">Выберите фрагмент любой встречи, где говорит <b id="sampleWho"></b>. Сначала показаны встречи, где этот голос уже узнан.</p>
     <div id="fragmentList" class="fragments"></div>
-    <div class="dlg-actions"><button value="cancel" class="ghost">Закрыть</button></div>
+    <div class="dlg-actions"><button type="button" value="cancel" class="ghost">Закрыть</button></div>
   </form>
 </dialog>
 
@@ -253,8 +253,8 @@
     <p id="mergeText"></p>
     <label>С каким слепком <select id="mergeInto"></select></label>
     <div class="dlg-actions">
-      <button value="cancel" class="ghost">Отмена</button>
-      <button value="ok" class="primary">Объединить</button>
+      <button type="button" value="cancel" class="ghost">Отмена</button>
+      <button type="submit" value="ok" class="primary">Объединить</button>
     </div>
   </form>
 </dialog>
@@ -264,8 +264,8 @@
     <h2>Удалить слепок голоса?</h2>
     <p id="voiceDeleteText"></p>
     <div class="dlg-actions">
-      <button value="cancel" class="ghost">Отмена</button>
-      <button value="ok" class="primary danger-bg">Удалить</button>
+      <button type="button" value="cancel" class="ghost">Отмена</button>
+      <button type="submit" value="ok" class="primary danger-bg">Удалить</button>
     </div>
   </form>
 </dialog>
@@ -276,8 +276,8 @@
     <p id="assignQuote" class="muted small"></p>
     <div id="assignOptions" class="assign-options"></div>
     <div class="dlg-actions">
-      <button value="cancel" class="ghost">Отмена</button>
-      <button value="ok" class="primary">Сохранить</button>
+      <button type="button" value="cancel" class="ghost">Отмена</button>
+      <button type="submit" value="ok" class="primary">Сохранить</button>
     </div>
   </form>
 </dialog>
@@ -290,10 +290,10 @@
       <textarea id="peopleNames" rows="3" placeholder="Олег, Даша, Ира Смирнова"></textarea></label>
     <div id="peopleKnown" class="known"></div>
     <div class="dlg-actions">
-      <button value="clear" class="ghost">Очистить</button>
+      <button type="button" value="clear" class="ghost">Очистить</button>
       <span class="spacer"></span>
-      <button value="cancel" class="ghost">Отмена</button>
-      <button value="ok" class="primary">Сохранить</button>
+      <button type="button" value="cancel" class="ghost">Отмена</button>
+      <button type="submit" value="ok" class="primary">Сохранить</button>
     </div>
   </form>
 </dialog>

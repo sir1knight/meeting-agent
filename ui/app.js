@@ -1172,11 +1172,19 @@ $("mSpeakers").addEventListener("click", (e) => {
   if (b) openRename(S.current.speakers[+b.dataset.rename]);
 });
 
+// Вторичные кнопки диалогов (type="button" с value="cancel"|"reset"|"clear") не перехватывают Enter,
+// но по клику закрывают <dialog> с нужным returnValue.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest('dialog form[method="dialog"] button[type="button"][value]');
+  if (btn) btn.closest("dialog").close(btn.value);
+});
+
 let renameTarget = null;
 async function openRename(sp) {
   renameTarget = sp;
   await loadVoices();
-  $("voiceNames").innerHTML = (S.voices.voices || []).map((v) => `<option value="${esc(v.name)}">`).join("");
+  const names = [...new Set([...(S.current.expected || []), ...(S.voices.voices || []).map((v) => v.name)].filter(Boolean))];
+  $("voiceNames").innerHTML = names.map((n) => `<option value="${esc(n)}">`).join("");
   $("renameName").value = sp.name || sp.guess || "";
   $("renameHint").textContent = sp.uncertain
     ? `Голос похож на «${sp.name}», но не наверняка (сходство ${sp.score}). Подтвердите имя или исправьте его.`

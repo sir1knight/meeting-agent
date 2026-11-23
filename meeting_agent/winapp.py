@@ -171,6 +171,7 @@ class Recording:
         self.hold_until = 0.0      # после смены микрофона/динамиков/сна не останавливаем запись
         self.mic_id: str | None = None
         self.speaker_id: str | None = None
+        self._dev_err: str | None = None
         self.silent_checks = 0
         self.warning: str | None = None
         self.health_at = 0.0
@@ -241,17 +242,17 @@ class Recording:
     def _watch_devices(self) -> None:
         """Сменился микрофон или динамики/наушники (гарнитура, док-станция): запись переходит на новое
         устройство и 20 с не останавливается — пока программа звонка переключается, звук может «пропасть»."""
-        from . import detect
+        from . import detect, winrec
 
+        err_now: str | None = None
         mid = (detect.meeting_capture_device_id("mic_only" if self.recorder.mic_only else self.source)
                if self.recorder else None)
         if not mid:
             try:
-                import soundcard as sc
-
-                mid = sc.default_microphone().id
-            except Exception:
+                mid = winrec.soundcard().default_microphone().id
+            except Exception as e:
                 mid = None
+                err_now = winrec._err_text(e)
         if mid and self.mic_id and mid != self.mic_id:
             log.info("Сменился микрофон (по умолчанию / eCommunications)")
             self.hold_until = max(self.hold_until, time.time() + 20)
@@ -265,11 +266,10 @@ class Recording:
         sid = detect.meeting_render_device_id(self.source) if self.recorder else None
         if not sid:
             try:
-                import soundcard as sc
-
-                sid = sc.default_speaker().id
-            except Exception:
+                sid = winrec.soundcard().default_speaker().id
+            except Exception as e:
                 sid = None
+                err_now = err_now or winrec._err_text(e)
         if sid and self.speaker_id and sid != self.speaker_id:
             log.info("Сменилось устройство вывода звука")
             self.hold_until = max(self.hold_until, time.time() + 20)
@@ -278,6 +278,10 @@ class Recording:
                 self.recorder.restart_speaker(sid)
         if sid:
             self.speaker_id = sid
+
+        if err_now and err_now != self._dev_err:
+            log.warning("Не удалось прочитать список аудиоустройств: %s", err_now)
+        self._dev_err = err_now
 
     def _check_health(self) -> None:
         """Раз в 15 с: дорожки живы (упавшие перезапускаются), микрофон не молчит нулями."""
@@ -906,6 +910,12 @@ def main() -> None:
             log.exception("Установка пакетов не удалась")
             _message(f"Не удалось установить компоненты: {e}\n\nЖурнал: {HOME / 'logs' / 'app.log'}")
             return
+        try:
+            from . import winrec
+
+            winrec.soundcard()  # прогрев soundcard в чистом потоке до инициализации COM
+        except Exception as e:
+            log.warning("Предзагрузка soundcard не удалась: %s", e)
         try:
             App().run()
         except Exception as e:
