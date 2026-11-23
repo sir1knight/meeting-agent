@@ -33,6 +33,7 @@ from . import config, osutil  # requests — внутри функций: в у�
 log = logging.getLogger(__name__)
 
 REPO = "sir1knight/Meeting_agent"
+GITHUB_REPO = "sir1knight/meeting-agent"
 BRANCH = "main"
 _GL = "https://gitlab.com/api/v4/projects/" + REPO.replace("/", "%2F")
 SOURCES = {
@@ -42,6 +43,9 @@ SOURCES = {
     "GitLab": {"manifest": f"{_GL}/repository/files/version.json/raw?ref={BRANCH}",
                "archive": f"{_GL}/repository/archive.zip?sha={BRANCH}",
                "page": f"https://gitlab.com/{REPO}"},
+    "GitHub": {"manifest": f"https://raw.githubusercontent.com/{GITHUB_REPO}/{BRANCH}/version.json",
+               "archive": f"https://github.com/{GITHUB_REPO}/archive/refs/heads/{BRANCH}.zip",
+               "page": f"https://github.com/{GITHUB_REPO}"},
 }
 PAGE = SOURCES["GitVerse"]["page"]
 KEEP = ("meeting_agent", "ui", "templates", "config.toml", "version.json", "requirements-windows.lock",
@@ -179,7 +183,7 @@ def _fetch_manifest(name: str, quick: bool) -> dict:
 def _all_failed(errors: dict[str, Exception]) -> RuntimeError:
     text = "; ".join(f"{e}" for e in errors.values())
     if all("Нет связи" in str(e) for e in errors.values()):
-        text = "Нет связи ни с GitVerse, ни с GitLab: проверьте интернет"
+        text = "Нет связи ни с GitVerse, ни с GitLab, ни с GitHub: проверьте интернет"
     return RuntimeError(text)
 
 

@@ -637,8 +637,9 @@ function updWindowHtml() {
   const known = u.latest !== undefined;
   const out = [];
   out.push(`<p class="muted small">Обновления скачиваются по компонентам — без переустановки приложения.
-    Код — с <a href="https://gitverse.ru/sir1knight/Meeting_agent" target="_blank">GitVerse</a> или
-    <a href="https://gitlab.com/sir1knight/Meeting_agent" target="_blank">GitLab</a> — откуда доступнее${u.source ? ` (сейчас — ${esc(u.source)})` : ""},
+    Код — с <a href="https://gitverse.ru/sir1knight/Meeting_agent" target="_blank">GitVerse</a>,
+    <a href="https://gitlab.com/sir1knight/Meeting_agent" target="_blank">GitLab</a> или
+    <a href="https://github.com/sir1knight/meeting-agent" target="_blank">GitHub</a> — откуда доступнее${u.source ? ` (сейчас — ${esc(u.source)})` : ""},
     модели — с Hugging Face${IS_WIN ? ", пакеты — с PyPI" : ""}.</p>`);
   if (UPD.error) out.push(`<div class="stale">${esc(UPD.error)}</div>`);
 
