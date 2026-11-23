@@ -605,8 +605,12 @@ class Handler(BaseHTTPRequestHandler):
     def api_post_reveal(self, q):
         data = self._data()
         cfg = config.load()
-        target = _note_path(cfg, data["id"]) if data.get("id") else cfg["paths"]["notes"]
-        cfg["paths"]["notes"].mkdir(parents=True, exist_ok=True)
+        if data.get("kind") == "logs":
+            target = config.HOME / "logs"
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target = _note_path(cfg, data["id"]) if data.get("id") else cfg["paths"]["notes"]
+            cfg["paths"]["notes"].mkdir(parents=True, exist_ok=True)
         osutil.reveal(target)
         self._json({"ok": True})
 

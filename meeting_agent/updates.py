@@ -233,6 +233,35 @@ def pending() -> str | None:
 
 
 SEEN = "seen-version.txt"  # версия, о которой пользователю уже сказали
+_GROUP_ORDER = ("Новое", "Исправлено", "Windows", "Для разработчиков")
+
+
+def _changes_since(manifest: dict, from_ver: str) -> tuple[dict[str, list[str]], int]:
+    """Собирает все изменения из manifest['history'] для версий строго новее from_ver
+    (включительно до manifest['app']), объединяя их по категориям.
+    Если history отсутствует (старый version.json) — возвращает manifest['changes']."""
+    history = manifest.get("history")
+    cur_t = _vt(manifest.get("app", "0"))
+    from_t = _vt(from_ver) if from_ver else (0,)
+    if not isinstance(history, list) or not history or cur_t <= from_t:
+        ch = manifest.get("changes") or {}
+        return (ch, 1 if ch else 0)
+    matched = [h for h in history if isinstance(h, dict) and from_t < _vt(h.get("version", "0")) <= cur_t]
+    if not matched:
+        ch = manifest.get("changes") or {}
+        return (ch, 1 if ch else 0)
+    raw: dict[str, list[str]] = {}
+    for rel in matched:
+        for group, items in (rel.get("changes") or {}).items():
+            dst = raw.setdefault(group, [])
+            for item in items:
+                if item not in dst:
+                    dst.append(item)
+    ordered = {g: raw[g] for g in _GROUP_ORDER if g in raw}
+    for g, items in raw.items():
+        if g not in ordered:
+            ordered[g] = items
+    return ordered, len(matched)
 
 
 def just_updated() -> dict | None:
@@ -252,8 +281,9 @@ def just_updated() -> dict | None:
     if not seen or _vt(cur) < _vt(seen):
         mark_seen()
         return None
+    changes, n_rel = _changes_since(running, seen)
     return {"from": seen, "to": cur, "date": running.get("date", ""), "notes": running.get("notes", ""),
-            "changes": running.get("changes") or {}}
+            "changes": changes, "releases": n_rel}
 
 
 def mark_seen() -> None:
@@ -283,7 +313,9 @@ def check(max_age_hours: float = 0) -> dict:
     m = remote_manifest(max_age_hours)
     latest = m.get("app", "0")
     need_shell = (m.get("shell") or {}).get(platform(), 1)
-    st.update(source=m.get("_source", ""), latest=latest, notes=m.get("notes", ""), changes=m.get("changes") or {}, date=m.get("date", ""),
+    changes, n_rel = _changes_since(m, st["version"])
+    st.update(source=m.get("_source", ""), latest=latest, notes=m.get("notes", ""), changes=changes,
+              changes_releases=n_rel, date=m.get("date", ""),
               code_available=_vt(latest) > _vt(st["version"]) and latest != st["pending"],
               shell_needed=need_shell > st["shell"], shell_latest=need_shell)
     if not python_bundled():

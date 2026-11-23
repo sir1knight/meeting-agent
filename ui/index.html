@@ -11,24 +11,34 @@
   <aside id="sidebar">
     <div class="side-head">
       <div class="brand">Встречи</div>
-      <div class="rec-group">
-        <button id="micOnlyBtn" class="ghost mic-only-btn" title="Записать только микрофон (очная встреча / диктофон)">🎙</button>
-        <button id="recordBtn" class="rec-btn" title="Записать сейчас (весь звук системы и микрофон)">
-          <span class="dot"></span><span class="label">Записать</span>
-        </button>
-      </div>
+    </div>
+    <div class="rec-hero" id="recHero">
+      <button id="recordBtn" class="rec-btn" title="Записать сейчас (весь звук системы и микрофон)">
+        <span class="dot"></span><span class="label">Начать запись</span>
+      </button>
+      <button id="micOnlyBtn" class="mic-only-btn" title="Записать только микрофон (очная встреча / диктофон)" aria-label="Только микрофон">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+      </button>
     </div>
     <div id="recBanner" class="rec-banner" hidden>
-      <span class="pulse"></span>
-      <span id="recText">Идёт запись</span>
-      <button id="recPause" class="link" title="Поставить запись на паузу или продолжить">Пауза</button>
-      <button id="recPeople" class="link" title="Кто на этой встрече">Участники</button>
-      <button id="recStop" class="link">Остановить</button>
+      <div class="rec-banner-top">
+        <span class="pulse"></span>
+        <span id="recText">Идёт запись</span>
+      </div>
+      <div class="rec-banner-acts">
+        <button id="recPause" class="rec-pill-btn" title="Поставить запись на паузу или продолжить">Пауза</button>
+        <button id="recPeople" class="rec-pill-btn" title="Кто на этой встрече">Участники</button>
+        <button id="recStop" class="rec-pill-btn stop">Стоп</button>
+      </div>
       <div id="recWarn" class="rec-warn" hidden></div>
     </div>
     <div id="permBanner" class="perm-banner" hidden></div>
     <button id="nextPeople" class="next-people" title="Имена помогают распознать речь и узнать собеседников"></button>
-    <input id="search" type="search" placeholder="Найти или спросить о встречах…" title="Enter — задать вопрос по всем встречам">
+    <div class="search-wrap">
+      <svg class="s-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="search" type="search" placeholder="Найти или спросить…" title="Enter — задать вопрос по всем встречам">
+      <kbd class="s-kbd" title="Enter — задать вопрос ИИ">↵</kbd>
+    </div>
     <div id="filters" class="filters" hidden>
       <select id="fPerson" title="Встречи с участником"><option value="">Все участники</option></select>
       <select id="fTopic" title="Встречи на тему"><option value="">Все темы</option></select>
@@ -38,18 +48,30 @@
     <button id="updatesBtn" class="upd-banner" type="button" hidden title="Обновления и компоненты">
       Доступны обновления <span id="updBadge" class="upd-badge"></span></button>
     <div class="side-foot">
-      <button id="importBtn" class="ghost" title="Импортировать аудиофайл">＋ Импорт</button>
-      <button id="voicesBtn" class="ghost" title="Слепки голоса собеседников">Голоса</button>
-      <button id="settingsBtn" class="ghost">Настройки</button>
+      <button id="importBtn" class="nav-btn" title="Импортировать аудиофайл">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <span>Импорт</span>
+      </button>
+      <button id="voicesBtn" class="nav-btn" title="Слепки голоса собеседников">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span>Голоса</span>
+      </button>
+      <button id="settingsBtn" class="nav-btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>Настройки</span>
+      </button>
       <input id="fileInput" type="file" accept="audio/*,video/mp4,video/quicktime,.m4a,.mp3,.wav,.ogg,.opus,.webm,.flac" hidden>
     </div>
   </aside>
 
   <main id="main">
     <section id="empty" class="empty">
+      <div class="empty-ico">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+      </div>
       <h1>Здесь появятся протоколы встреч</h1>
-      <p>Когда начнётся встреча в Zoom, запись включится сама. После звонка Meeting Agent расшифрует разговор и составит протокол: кратко, решения, задачи и открытые вопросы.</p>
-      <p class="muted">Можно и вручную: кнопка «Записать» слева или перетащите сюда аудиофайл, например запись с диктофона.</p>
+      <p>Когда начнётся звонок, запись включится сама. После встречи Meeting Agent расшифрует разговор и составит протокол: кратко, решения, задачи и открытые вопросы.</p>
+      <p class="muted">Можно и вручную: кнопка «Начать запись» слева или перетащите сюда аудиофайл.</p>
     </section>
 
     <section id="meeting" hidden>
@@ -64,12 +86,26 @@
             <button class="tab" data-tab="chat" role="tab" title="Вопросы и письма по этой встрече">Спросить</button>
           </div>
           <div class="actions">
-            <button id="copyBtn" class="ghost" title="Скопировать протокол в буфер обмена">Копировать</button>
-            <button id="exportBtn" class="ghost" title="Сохранить в Word, PDF или Markdown">Скачать…</button>
-            <button id="replaceBtn" class="ghost" title="Найти и заменить слово по всей встрече: протокол, расшифровка, версии">Заменить…</button>
-            <button id="redoBtn" class="ghost">Пересоздать…</button>
-            <button id="revealBtn" class="ghost" title="Показать файл заметки в Finder">В Finder</button>
-            <button id="deleteBtn" class="ghost danger">Удалить</button>
+            <button id="copyBtn" class="act-btn" title="Скопировать протокол в буфер обмена">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              <span>Копировать</span>
+            </button>
+            <button id="exportBtn" class="act-btn" title="Сохранить в Word, PDF или Markdown">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span>Скачать…</span>
+            </button>
+            <div class="more-wrap">
+              <button id="moreMenuBtn" class="act-btn icon-only" type="button" title="Ещё действия" aria-label="Ещё действия" aria-haspopup="true" aria-expanded="false">
+                <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+              </button>
+              <div id="moreMenu" class="more-menu" hidden>
+                <button id="replaceBtn" class="more-item" title="Найти и заменить слово по всей встрече: протокол, расшифровка, версии">Заменить слово…</button>
+                <button id="redoBtn" class="more-item">Пересоздать протокол…</button>
+                <button id="revealBtn" class="more-item" title="Показать файл заметки в Finder">Показать в Finder</button>
+                <div class="more-sep"></div>
+                <button id="deleteBtn" class="more-item danger">Удалить встречу</button>
+              </div>
+            </div>
           </div>
         </div>
       </header>

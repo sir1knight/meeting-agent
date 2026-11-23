@@ -50,8 +50,29 @@ const PC = IS_WIN ? "этом компьютере" : "этом Mac";
 const CMD_KEY = IS_WIN ? "Ctrl+" : "⌘";
 if (IS_WIN) {
   const rb = document.getElementById("revealBtn");
-  if (rb) { rb.textContent = "В Проводнике"; rb.title = "Показать файл заметки в Проводнике"; }
+  if (rb) { rb.textContent = "Показать в Проводнике"; rb.title = "Показать файл заметки в Проводнике"; }
 }
+
+// Цветные аватары спикеров и иконки проигрывания образцов голоса.
+const SPEAKER_COLORS = ["#4c82f7", "#34b37e", "#9b6df3", "#e09132", "#e25d8a", "#2ca8b8", "#6d7cf2", "#d96b43"];
+function speakerColor(name) {
+  const s = String(name || "").trim();
+  if (!s || s === "Я") return "var(--muted)";
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return SPEAKER_COLORS[Math.abs(h) % SPEAKER_COLORS.length];
+}
+function speakerInitials(name) {
+  const s = String(name || "").replace(/[*?]+$/g, "").trim();
+  if (!s) return "?";
+  if (s === "Я") return "Я";
+  const m = /^Собеседник\s+(\d+)$/i.exec(s);
+  if (m) return "С" + m[1];
+  const parts = s.split(/\s+/).filter(Boolean);
+  return parts.length >= 2 ? (parts[0][0] + parts[1][0]).toUpperCase() : s.slice(0, 2).toUpperCase();
+}
+const PLAY_ICO = '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 2.75l9 5.25-9 5.25z"/></svg>';
+const PAUSE_ICO = '<svg viewBox="0 0 16 16" fill="currentColor"><rect x="3.5" y="2.8" width="3.2" height="10.4" rx="1"/><rect x="9.3" y="2.8" width="3.2" height="10.4" rx="1"/></svg>';
 
 // ---------- утилиты ----------
 
@@ -180,9 +201,10 @@ function segmentsHtml(segs, playable = false, chapters = [], editable = false) {
       head += `<div class="chapter-h" id="ch${ci}" data-start="${c.start}"><span>${esc(c.title)}</span>${playable
         ? `<button class="tc" data-t="${c.start}">▶ ${t}</button>` : `<span class="tc-off">${t}</span>`}</div>`;
     }
+    const spCol = speakerColor(s.speaker);
     return head + `<div class="utt" data-start="${s.start}" data-i="${s.i}">${playable ? `<button class="ts ts-play" title="Слушать с этого места"><span class="ts-icon">▶</span>${fmtTs(s.start)}</button>` : `<span class="ts">${fmtTs(s.start)}</span>`}${s.label
-      ? `<button class="who who-btn" data-seg="${s.i}" title="Это сказал другой человек?">${esc(s.speaker)}:</button>`
-      : `<span class="who">${esc(s.speaker)}:</span>`} <span class="utt-text">${esc(shownText(s))}</span>${editable
+      ? `<button class="who who-btn" data-seg="${s.i}" style="color:${spCol}" title="Это сказал другой человек?">${esc(s.speaker)}:</button>`
+      : `<span class="who" style="color:${spCol}">${esc(s.speaker)}:</span>`} <span class="utt-text">${esc(shownText(s))}</span>${editable
       ? `<button class="edit-btn" data-edit="${s.i}" title="Исправить текст реплики">✎</button>` : ""}</div>`;
   }).join("");
 }
@@ -223,12 +245,35 @@ const S = {
   setupDismissed: false,
 };
 
+function closeMoreMenu() {
+  const m = $("moreMenu"), b = $("moreMenuBtn");
+  if (m) m.hidden = true;
+  if (b) b.setAttribute("aria-expanded", "false");
+}
+if ($("moreMenuBtn")) {
+  $("moreMenuBtn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const m = $("moreMenu");
+    const open = m.hidden;
+    m.hidden = !open;
+    $("moreMenuBtn").setAttribute("aria-expanded", String(open));
+  });
+  $("moreMenu").addEventListener("click", () => closeMoreMenu());
+  document.addEventListener("click", (e) => {
+    if ($("moreMenu") && !$("moreMenu").hidden && !e.target.closest(".more-wrap")) closeMoreMenu();
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMoreMenu(); });
+}
+
 function show(view) {
   S.view = view;
+  closeMoreMenu();
   for (const id of ["empty", "meeting", "settings", "setup", "voices", "ask"]) $(id).hidden = true;
   stopAudio();
   if (view === "meeting") (S.current ? $("meeting") : $("empty")).hidden = false;
   else $(view).hidden = false;
+  if ($("voicesBtn")) $("voicesBtn").classList.toggle("active", view === "voices");
+  if ($("settingsBtn")) $("settingsBtn").classList.toggle("active", view === "settings");
   renderList();
 }
 
@@ -722,11 +767,14 @@ async function showUpdateDone() {
   d.showModal();
 }
 
-// «Что нового» версии с GitVerse/GitLab (раздел CHANGELOG.md, перенесённый в version.json).
+// «Что нового» версий с GitVerse/GitLab/GitHub (разделы CHANGELOG.md, перенесённые в version.json).
 function changesHtml(u) {
   const groups = Object.entries(u.changes || {});
   if (!groups.length) return esc(u.notes || "");
-  return `<details class="changes"><summary>Что нового в ${esc(u.latest)}${u.date ? ` (${esc(u.date)})` : ""}</summary>
+  const label = (u.changes_releases || 1) > 1 && u.version
+    ? `Что нового (${esc(u.version)} → ${esc(u.latest)})`
+    : `Что нового в ${esc(u.latest)}${u.date ? ` (${esc(u.date)})` : ""}`;
+  return `<details class="changes"><summary>${label}</summary>
     ${groups.map(([g, items]) => `<div class="small"><b>${esc(g)}</b><ul>${items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul></div>`).join("")}</details>`;
 }
 
@@ -1124,7 +1172,8 @@ function contactLinks(p) {
 function renderSpeakers() {
   const m = S.current;
   const sps = m.speakers || [];
-  const me = (m.participants || "").split(",").map((x) => x.trim()).includes("Я") ? '<span class="chip me">Я</span>' : "";
+  const me = (m.participants || "").split(",").map((x) => x.trim()).includes("Я")
+    ? '<span class="chip me"><span class="sp-av me">Я</span><span class="chip-label">Я</span></span>' : "";
   if (!sps.length) {
     $("mSpeakers").innerHTML = me;
     return;
@@ -1136,10 +1185,17 @@ function renderSpeakers() {
       : sp.guess ? `Предполагаемое имя по разговору: «${sp.guess_evidence}». Нажмите, чтобы подтвердить или исправить`
       : `${Math.round(sp.duration)} с речи. Нажмите, чтобы указать имя`;
     const cls = sp.uncertain ? " uncertain" : sp.name ? "" : sp.guess ? " guessed" : " unnamed";
+    const displayName = sp.name || sp.guess || sp.base;
+    const col = speakerColor(displayName);
+    const ini = speakerInitials(displayName);
     const label = sp.name ? esc(sp.name) + (sp.uncertain ? ' <b class="q">?</b>' : "")
       : sp.guess ? esc(sp.guess) + '<b class="star">*</b>' : esc(sp.base);
+    const key = `speaker/sample?id=${encodeURIComponent(m.id)}&speaker=${encodeURIComponent(sp.label)}`;
+    const playing = audioKey === key;
     return `<span class="chip${cls}">
-      ${sp.has_sample ? `<button class="play" data-play-speaker="${esc(sp.label)}" title="Прослушать">▶</button>` : ""}
+      ${sp.has_sample
+        ? `<button class="play${playing ? " playing" : ""}" data-play-speaker="${esc(sp.label)}" data-play-key="${esc(key)}" style="--sp:${col}" title="${playing ? "Остановить" : "Прослушать"}">${playing ? PAUSE_ICO : PLAY_ICO}</button>`
+        : `<span class="sp-av" style="--sp:${col}">${esc(ini)}</span>`}
       <button class="chip-name" data-rename="${i}" title="${esc(title)}">${label}</button>${contactLinks(sp)}</span>`;
   }).join("");
 }
@@ -1223,30 +1279,56 @@ $("renameDialog").addEventListener("close", async () => {
 
 // ---------- прослушивание образцов ----------
 
-let audioEl = null, audioBtn = null;
+let audioEl = null, audioKey = null, audioGen = 0;
+
+function syncPlayButtons() {
+  document.querySelectorAll(".play[data-play-key]").forEach((b) => {
+    const on = !!audioKey && b.dataset.playKey === audioKey;
+    b.classList.toggle("playing", on);
+    b.innerHTML = on ? PAUSE_ICO : PLAY_ICO;
+    b.title = on ? "Остановить" : "Прослушать";
+  });
+}
+
 function stopAudio() {
-  if (audioEl) { audioEl.pause(); URL.revokeObjectURL(audioEl.src); }
-  if (audioBtn) audioBtn.classList.remove("playing");
-  audioEl = audioBtn = null;
+  audioGen++;
+  if (audioEl) {
+    try { audioEl.pause(); } catch {}
+    if (audioEl.src) URL.revokeObjectURL(audioEl.src);
+  }
+  audioEl = null;
+  audioKey = null;
+  syncPlayButtons();
 }
 
 async function playAudio(path, btn) {
-  const same = audioBtn === btn;
+  const same = audioKey === path;
   stopAudio();
-  if (same) return;  // повторное нажатие — стоп
+  if (same) return;  // повторное нажатие — пауза/стоп
+  const gen = ++audioGen;
+  audioKey = path;
+  if (btn && !btn.dataset.playKey) btn.dataset.playKey = path;
+  syncPlayButtons();
   try {
     const r = await fetch("/api/" + path, { headers: { "X-Token": TOKEN } });
+    if (gen !== audioGen) return;  // пользователь уже нажал стоп или другой образец
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "Образец не найден");
-    audioEl = new Audio(URL.createObjectURL(await r.blob()));
-    audioBtn = btn;
-    btn.classList.add("playing");
-    audioEl.onended = stopAudio;
-    await audioEl.play();
+    const blob = await r.blob();
+    if (gen !== audioGen) return;
+    const el = new Audio(URL.createObjectURL(blob));
+    audioEl = el;
+    el.onended = () => { if (audioEl === el) stopAudio(); };
+    el.onerror = () => { if (audioEl === el) stopAudio(); };
+    await el.play();
   } catch (e) {
-    stopAudio();
-    toast(e.message);
+    if (gen === audioGen) {
+      stopAudio();
+      toast(e.message);
+    }
   }
 }
+
+$("sampleDialog").addEventListener("close", stopAudio);
 
 // ---------- раздел «Голоса» ----------
 
@@ -1263,46 +1345,61 @@ async function loadVoices(force = false) {
 
 function renderVoices() {
   const v = S.voices;
-  const intro = `<h1>Голоса</h1>
-    <p class="muted">Meeting Agent запоминает собеседников по голосу и на следующих встречах сам подписывает их по имени.
-    Чтобы добавить человека, откройте встречу и нажмите на «Собеседник N» над протоколом.</p>`;
-  const privacy = `<div class="card"><div class="hint">Слепки голоса — биометрические данные. Они хранятся только на ${PC}
-    (${esc((S.settings || {}).notes_dir ? S.settings.notes_dir.replace(/notes$/, "voices") : "~/MeetingAgent/voices")}) и никуда не отправляются.
-    Предупреждайте коллег, что вы записываете встречи и запоминаете голоса.</div></div>`;
+  const header = `<div class="st-top"><div><h1>Голоса</h1>
+    <div class="st-desc" style="margin-top:4px">Meeting Agent запоминает собеседников по голосу и на следующих встречах сам подписывает их по имени. Чтобы добавить человека, откройте встречу и нажмите на «Собеседник N» над протоколом.</div></div></div>`;
+  const vdir = (S.settings || {}).notes_dir ? S.settings.notes_dir.replace(/notes$/, "voices") : "~/MeetingAgent/voices";
+  const privacy = `<div class="st-legal" style="margin-top:20px">${ST_ICONS.shield}<span><b>Локальное хранение биометрии:</b> слепки голоса хранятся только на ${PC} (${esc(vdir)}) и никуда не отправляются. Предупреждайте коллег о записи встреч.</span></div>`;
   if (!v.available) {
-    $("voices").innerHTML = `<div class="page">${intro}<div class="card"><h2>Пока недоступно</h2>
-      <div class="hint">${esc(v.reason)}</div>
-      <button class="ghost" id="voicesToSettings">Открыть настройки</button></div>${privacy}</div>`;
-    $("voicesToSettings").onclick = () => $("settingsBtn").click();
+    $("voices").innerHTML = `<div class="st-page">${header}
+      ${stSection("Пока недоступно", `<div class="st-block">
+        <div class="st-desc">${esc(v.reason)}</div>
+        <button class="st-btn" type="button" id="voicesToSettings" style="margin-top:10px">Открыть настройки</button>
+      </div>`)}${privacy}</div>`;
+    $("voicesToSettings").onclick = () => { settingsTab = "speech"; $("settingsBtn").click(); };
     return;
   }
-  const cards = v.voices.map((p) => `<div class="card voice" data-id="${p.id}">
+  const rows = v.voices.map((p) => {
+    const col = speakerColor(p.name);
+    const ini = speakerInitials(p.name);
+    const key = `voices/sample?id=${p.id}`;
+    const playing = audioKey === key;
+    return `<div class="st-block voice-row voice" data-id="${p.id}">
       <div class="voice-head">
-        ${p.has_sample ? `<button class="play big" data-play-voice="${p.id}" title="Прослушать образец">▶</button>` : '<span class="play big off" title="Нет образца">▶</span>'}
+        <div class="voice-av-wrap">
+          <div class="sp-av big" style="--sp:${col}">${esc(ini)}</div>
+          ${p.has_sample
+            ? `<button class="play mini-over${playing ? " playing" : ""}" data-play-voice="${p.id}" data-play-key="${esc(key)}" title="${playing ? "Остановить" : "Прослушать образец"}">${playing ? PAUSE_ICO : PLAY_ICO}</button>`
+            : ""}
+        </div>
         <div class="voice-fields">
-          <input type="text" data-f="name" value="${esc(p.name)}" placeholder="Имя" aria-label="Имя">
-          <div class="row">
-            <input type="text" data-f="email" value="${esc(p.email)}" placeholder="почта@компания.ru" aria-label="Почта">
-            <input type="text" data-f="telegram" value="${esc(p.telegram)}" placeholder="ник в Telegram" aria-label="Telegram">
-            <button class="ghost" data-save="${p.id}">Сохранить</button>
+          <div class="voice-top-line">
+            <input class="st-input voice-name" type="text" data-f="name" value="${esc(p.name)}" placeholder="Имя" aria-label="Имя">
+            <span class="voice-cnt" title="На скольких встречах учтён голос">${p.meetings} встр.</span>
+            <button class="st-btn" type="button" data-save="${p.id}">Сохранить</button>
+          </div>
+          <div class="voice-contacts">
+            <input class="st-input" type="text" data-f="email" value="${esc(p.email)}" placeholder="почта@компания.ru" aria-label="Почта">
+            <input class="st-input" type="text" data-f="telegram" value="${esc(p.telegram)}" placeholder="@telegram" aria-label="Telegram">
+          </div>
+          <div class="voice-foot">
+            <button class="link small" type="button" data-sample="${p.id}">Заменить образец</button>
+            <button class="link small" type="button" data-merge="${p.id}"${v.voices.length < 2 ? " disabled" : ""}>Объединить с…</button>
+            <span class="spacer"></span>
+            <button class="link small danger" type="button" data-del="${p.id}">Удалить</button>
           </div>
         </div>
       </div>
-      <div class="voice-foot">
-        <span class="muted">Учтено встреч: ${p.meetings}</span>
-        <span class="spacer"></span>
-        <button class="link" data-sample="${p.id}">Заменить образец</button>
-        <button class="link" data-merge="${p.id}"${v.voices.length < 2 ? " disabled" : ""}>Объединить с…</button>
-        <button class="link danger" data-del="${p.id}">Удалить</button>
-      </div>
-    </div>`).join("");
-  $("voices").innerHTML = `<div class="page">${intro}
-    ${cards || '<div class="card"><div class="hint">Слепков пока нет.</div></div>'}${privacy}</div>`;
+    </div>`;
+  }).join("");
+  $("voices").innerHTML = `<div class="st-page">${header}
+    ${stSection(`Сохранённые голоса`, rows || '<div class="st-block"><div class="st-desc">Слепков пока нет — переименуйте любого собеседника в карточке встречи.</div></div>',
+      v.voices.length ? `<span class="muted small">${v.voices.length}</span>` : "")}
+    ${privacy}</div>`;
 }
 
 $("voicesBtn").addEventListener("click", async () => {
   show("voices");
-  $("voices").innerHTML = '<div class="page"><h1>Голоса</h1><p class="muted"><span class="spinner"></span> Загружаю…</p></div>';
+  $("voices").innerHTML = '<div class="st-page"><div class="st-top"><h1>Голоса</h1></div><p class="muted"><span class="spinner"></span> Загружаю…</p></div>';
   await loadVoices(true);
   renderVoices();
 });
@@ -1310,11 +1407,12 @@ $("voicesBtn").addEventListener("click", async () => {
 const voiceById = (id) => S.voices.voices.find((x) => x.id === id);
 
 $("voices").addEventListener("click", async (e) => {
-  const t = e.target;
-  if (t.dataset.playVoice) return playAudio(`voices/sample?id=${t.dataset.playVoice}`, t);
-  if (t.dataset.save) {
-    const card = t.closest(".voice");
-    const body = { id: t.dataset.save };
+  const playBtn = e.target.closest("[data-play-voice]");
+  if (playBtn) return playAudio(`voices/sample?id=${playBtn.dataset.playVoice}`, playBtn);
+  const saveBtn = e.target.closest("[data-save]");
+  if (saveBtn) {
+    const card = saveBtn.closest(".voice");
+    const body = { id: saveBtn.dataset.save };
     card.querySelectorAll("[data-f]").forEach((i) => (body[i.dataset.f] = i.value));
     try {
       await api("voices/update", { method: "POST", body });
@@ -1324,18 +1422,23 @@ $("voices").addEventListener("click", async (e) => {
     } catch (err) {
       toast(err.message);
     }
+    return;
   }
-  if (t.dataset.sample) openSampleDialog(voiceById(t.dataset.sample));
-  if (t.dataset.merge) {
-    const p = voiceById(t.dataset.merge);
+  const sampleBtn = e.target.closest("[data-sample]");
+  if (sampleBtn) return openSampleDialog(voiceById(sampleBtn.dataset.sample));
+  const mergeBtn = e.target.closest("[data-merge]");
+  if (mergeBtn) {
+    const p = voiceById(mergeBtn.dataset.merge);
     $("mergeText").textContent = `Эмбеддинги и встречи слепка «${p.name}» перейдут в выбранный слепок, а «${p.name}» будет удалён. Используйте, если один человек оказался записан под двумя именами.`;
     $("mergeInto").innerHTML = S.voices.voices.filter((x) => x.id !== p.id)
       .map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join("");
     $("mergeDialog").dataset.id = p.id;
     $("mergeDialog").showModal();
+    return;
   }
-  if (t.dataset.del) {
-    const p = voiceById(t.dataset.del);
+  const delBtn = e.target.closest("[data-del]");
+  if (delBtn) {
+    const p = voiceById(delBtn.dataset.del);
     $("voiceDeleteText").textContent = `Слепок «${p.name}» и его образец будут удалены. В уже готовых протоколах имя останется, но на новых встречах этот голос узнаваться не будет.`;
     $("voiceDeleteDialog").dataset.id = p.id;
     $("voiceDeleteDialog").showModal();
@@ -1376,18 +1479,24 @@ async function openSampleDialog(p) {
     $("fragmentList").innerHTML = frs.map((f, i) => {
       const note = titles[f.note];
       const when = note ? `${dayLabel(parseDate(note.date))}, ${hhmm(parseDate(note.date))} — ${note.title}` : f.meeting;
+      const key = `voices/fragment?meeting=${encodeURIComponent(f.meeting)}&speaker=${encodeURIComponent(f.speaker)}`;
+      const playing = audioKey === key;
       return `<div class="fragment${f.voice_id === p.id ? " own" : ""}">
-        <button class="play" data-frag="${i}" title="Прослушать">▶</button>
+        <button class="play${playing ? " playing" : ""}" data-frag="${i}" data-play-key="${esc(key)}" title="${playing ? "Остановить" : "Прослушать"}">${playing ? PAUSE_ICO : PLAY_ICO}</button>
         <div><div>${esc(f.display)}${f.voice_id === p.id ? ' <span class="badge ok">этот голос</span>' : ""}</div>
         <div class="muted small">${esc(when)} · ${Math.round(f.duration)} с речи</div></div>
         <button class="ghost" data-pick="${i}">Выбрать</button></div>`;
     }).join("") || '<p class="muted">Нет встреч с образцами голоса. Они появляются у встреч, обработанных с разделением собеседников.</p>';
     $("fragmentList").onclick = async (e) => {
-      const f = frs[+(e.target.dataset.frag ?? e.target.dataset.pick)];
-      if (!f) return;
-      if (e.target.dataset.frag !== undefined) {
-        return playAudio(`voices/fragment?meeting=${encodeURIComponent(f.meeting)}&speaker=${encodeURIComponent(f.speaker)}`, e.target);
+      const fragBtn = e.target.closest("[data-frag]");
+      if (fragBtn) {
+        const f = frs[+fragBtn.dataset.frag];
+        if (f) return playAudio(`voices/fragment?meeting=${encodeURIComponent(f.meeting)}&speaker=${encodeURIComponent(f.speaker)}`, fragBtn);
+        return;
       }
+      const pickBtn = e.target.closest("[data-pick]");
+      const f = pickBtn ? frs[+pickBtn.dataset.pick] : null;
+      if (!f) return;
       try {
         await api("voices/set_sample", { method: "POST", body: { id: p.id, meeting: f.meeting, speaker: f.speaker } });
         $("sampleDialog").close();
@@ -1487,8 +1596,9 @@ function renderRecording() {
   const rec = (S.status && S.status.recording) || {};
   const on = rec.state === "recording";
   const paused = !!(on && rec.paused);
+  if ($("recHero")) $("recHero").hidden = on;
   $("recordBtn").classList.toggle("recording", on);
-  $("recordBtn").querySelector(".label").textContent = on ? "Стоп" : "Записать";
+  $("recordBtn").querySelector(".label").textContent = on ? "Стоп" : "Начать запись";
   if ($("micOnlyBtn")) $("micOnlyBtn").hidden = on;
   $("recBanner").hidden = !on;
   $("recBanner").classList.toggle("paused", paused);
@@ -2085,149 +2195,261 @@ function gpuHtml(g) {
   return html;
 }
 
-function renderSettings() {
-  const s = S.settings, st = S.status;
-  if (!s) return;
-  $("settings").innerHTML = `<div class="page">
-    <h1>Настройки</h1>
-    <div class="card"><h2>Кто пишет протоколы</h2>${backendRadios(s)}
-      <div class="field"><label for="sTemplate">Шаблон по умолчанию</label>
-        <select id="sTemplate">${s.templates.map((t) => `<option value="${esc(t.id)}"${t.id === s.template ? " selected" : ""}>${esc(t.title)}${t.custom ? " (свой)" : ""}</option>`).join("")}</select></div>
-    </div>
+const ST_ICONS = {
+  sliders: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>',
+  spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8L20 11l-6.1 2.2L12 19l-1.9-5.8L4 11l6.1-2.2z"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><line x1="12" y1="19" x2="12" y2="22"/></svg>',
+  cpu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>',
+  user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20a8 8 0 0 1 16 0"/></svg>',
+  calendar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
+  record: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg>',
+  wave: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="10" x2="4" y2="14"/><line x1="8" y1="6" x2="8" y2="18"/><line x1="12" y1="3" x2="12" y2="21"/><line x1="16" y1="7" x2="16" y2="17"/><line x1="20" y1="10" x2="20" y2="14"/></svg>',
+  phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="2" width="12" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>',
+  window: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/></svg>',
+  disk: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+  doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>',
+  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+  key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M11 12l9-9"/><path d="M17 6l3 3"/><path d="M14 9l3 3"/></svg>',
+  bolt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>',
+  book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+  users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
+  palette: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18.37 2.63L14 7l-1.59-1.59a2 2 0 0 0-2.82 0L8 7l9 9 1.59-1.59a2 2 0 0 0 0-2.82L17 10l4.37-4.37a2.12 2.12 0 1 0-3-3z"/><path d="M9 8c-2 3-4 3.5-7 4l8 10c2-1 6-5 6-7"/></svg>',
+};
 
-    <div class="card"><h2>Шаблоны протоколов</h2>
-      <div class="hint">Шаблон — инструкция, по которой модель пишет протокол. Создайте свой: из списка пунктов или чек-листа
-        (например, вопросы для оценки кандидата) или полностью своей инструкцией. Встроенный шаблон можно взять за основу.</div>
-      <div class="tpl-list">${s.templates.map((t) => `<div class="tpl-row"><span class="grow">${esc(t.title)}
-        ${t.custom ? '<span class="badge ok">свой</span>' : '<span class="muted small">встроенный</span>'}</span>
-        ${t.custom ? `<button class="ghost small" type="button" data-tpl-edit="${esc(t.id)}">Изменить</button>
-          <button class="ghost small" type="button" data-tpl-del="${esc(t.id)}">Удалить</button>`
-          : `<button class="ghost small" type="button" data-tpl-copy="${esc(t.id)}">Взять за основу</button>`}</div>`).join("")}</div>
-      <button class="ghost" type="button" id="tplNew">＋ Свой шаблон</button>
-    </div>
+function getTheme() {
+  try { return localStorage.getItem("ma_theme") || "system"; } catch { return "system"; }
+}
+function applyTheme(mode) {
+  const m = (mode === "dark" || mode === "light") ? mode : "system";
+  if (m === "system") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", m);
+  try { localStorage.setItem("ma_theme", m); } catch {}
+}
+applyTheme(getTheme());
 
-    <div class="card"><h2>Умный поиск</h2>
-      <div class="hint">Вопросы по встречам обычными словами (Enter в поле поиска). Кто формулирует ответ:</div>
-      ${Object.entries(s.ask_backends).map(([k, v]) => `<label class="radio${k === s.ask_backend ? " selected" : ""}">
-        <input type="radio" name="askBackend" value="${k}"${k === s.ask_backend ? " checked" : ""}>
-        <div><div class="r-title">${esc(v)}</div><div class="r-desc">${{
-          "claude-code": "Без доплаты, по подписке Claude. Найденные фрагменты встреч уходят в облако Anthropic.",
-          "claude": "Нужен ключ Claude API (ниже, в разделе «Claude API»). Фрагменты уходят в облако Anthropic.",
-          "gemini": "Нужен ключ Gemini API (ниже, в разделе «Gemini и ChatGPT»). Фрагменты уходят в облако Google.",
-          "openai": "Нужен ключ OpenAI API (ниже, в разделе «Gemini и ChatGPT»). Фрагменты уходят в облако OpenAI.",
-          "local": "Ничего не уходит в интернет. Ответ — 20–60 секунд, качество скромнее.",
-        }[k] || ""}</div></div></label>`).join("")}
-    </div>
+const stSwitch = (id, on, disabled = false) =>
+  `<label class="sw"><input type="checkbox" id="${id}"${on ? " checked" : ""}${disabled ? " disabled" : ""}><span></span></label>`;
 
-    <div class="card"><h2>Распознавание речи</h2>
-      <div class="hint">Чем превращать звук в текст. Всё работает на ${PC}.</div>
-      ${asrRadios(s)}
-      <label class="check"><input type="checkbox" id="sLive"${s.live_enabled ? " checked" : ""}> Распознавать во время встречи — после встречи протокол готов быстрее</label>
-      <div class="hint">Работает с ${IS_WIN ? "GigaAM" : "GigaAM и Whisper turbo"}, с пониженным приоритетом, чтобы не мешать Zoom. От батареи — не работает: всё досчитается после встречи.</div>
-      <div class="field"><label for="sMyName">Как вас зовут</label>
-        <div class="hint">К вам обращаются почти на каждой встрече: с именем распознавание пишет его правильно («Ильяс», а не «Илья»), а протокол подписывает ваши задачи по имени.</div>
-        <input type="text" id="sMyName" maxlength="60" placeholder="Например: Ильяс" value="${esc(s.my_name || "")}"></div>
-      <div class="field"><label for="sGlossary">Глоссарий</label>
-        <div class="hint">Термины, имена и аббревиатуры, которые звучат на ваших встречах, — через запятую. Пополняется сам, когда вы исправляете имя или термин в расшифровке.
-          ${s.asr_engine === "gigaam" ? "С GigaAM фразы с похожими на эти имена словами перепроверяются Whisper (нужна скачанная модель Whisper)." : ""}</div>
-        <textarea id="sGlossary">${esc(s.glossary.join(", "))}</textarea></div>
-    </div>
-
-    <div class="card"><h2>Разделение собеседников</h2>
-      <div class="hint">Подписывает собеседников «Собеседник 1», «Собеседник 2»… Ваша речь всегда подписана «Я». Нужен бесплатный токен Hugging Face и согласие с условиями двух моделей:
-        <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank">speaker-diarization-3.1</a> и
-        <a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank">segmentation-3.0</a> (кнопка «Agree»).</div>
-      <label class="check"><input type="checkbox" id="sDiar"${s.diarization_enabled ? " checked" : ""}> Разделять собеседников по голосам</label>
-      <label class="check"><input type="checkbox" id="sVoices"${s.voices_enabled ? " checked" : ""}${s.diarization_enabled ? "" : " disabled"}> Узнавать собеседников по голосу (раздел «Голоса»)</label>
-      <label class="check"><input type="checkbox" id="sGuess"${s.names_guess ? " checked" : ""}${s.diarization_enabled ? "" : " disabled"}> Угадывать имена по разговору — отмечаются звёздочкой: «Олег*»</label>
-      <div class="field"><label for="sHf">Токен Hugging Face ${s.hf_token_set ? '<span class="badge ok">сохранён</span>' : ""}</label>
-        <div class="row"><input type="password" id="sHf" placeholder="${s.hf_token_set ? "•••••• — чтобы заменить, вставьте новый" : "hf_…  — huggingface.co/settings/tokens, тип Read"}" autocomplete="off">
-        <button class="ghost" id="sHfSave">Сохранить</button><button class="ghost" id="sHfCheck"${s.hf_token_set ? "" : " disabled"}>Проверить</button></div>
-        <div id="sHfResult" class="hint"></div></div>
-    </div>
-
-    <div class="card"><h2>Claude API</h2>
-      <div class="hint">Нужен только для варианта «Claude API по ключу». Ключ создаётся на platform.claude.com, оплата отдельно от подписки.</div>
-      <div class="field"><label for="sKey">Ключ API ${s.anthropic_key_set ? '<span class="badge ok">сохранён</span>' : ""}</label>
-        <div class="row"><input type="password" id="sKey" placeholder="${s.anthropic_key_set ? "•••••• — чтобы заменить, вставьте новый" : "sk-ant-…"}" autocomplete="off">
-        <button class="ghost" id="sKeySave">Сохранить</button>${s.anthropic_key_set ? '<button class="ghost" id="sKeyDel">Удалить</button>' : ""}</div>
-        ${keyCheckHtml("claude", s.anthropic_key_set)}</div>
-      <div class="hint">Claude Code: ${s.claude_code_path ? `<span class="badge ok">найден</span> ${esc(s.claude_code_path)}` : '<span class="badge warn">не установлен</span>'}</div>
-    </div>
-
-    <div class="card"><h2>Gemini и ChatGPT</h2>
-      <div class="hint">Нужны для вариантов «Gemini API по ключу» и «ChatGPT (OpenAI API) по ключу» — в протоколах и в умном поиске. Оплата за запросы, отдельно от подписок Gemini и ChatGPT Plus.</div>
-      <div class="field"><label for="sGemini">Ключ Gemini API ${s.gemini_key_set ? '<span class="badge ok">сохранён</span>' : ""}</label>
-        <div class="hint">Создаётся на <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>.</div>
-        <div class="row"><input type="password" id="sGemini" placeholder="${s.gemini_key_set ? "•••••• — чтобы заменить, вставьте новый" : "AIza…"}" autocomplete="off">
-        <button class="ghost" id="sGeminiSave">Сохранить</button>${s.gemini_key_set ? '<button class="ghost" id="sGeminiDel">Удалить</button>' : ""}</div>
-        ${keyCheckHtml("gemini", s.gemini_key_set)}</div>
-      ${s.gemini_key_set ? geminiModelField(s) : ""}
-      <div class="field"><label for="sOpenai">Ключ OpenAI API ${s.openai_key_set ? '<span class="badge ok">сохранён</span>' : ""}</label>
-        <div class="hint">Создаётся на <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com/api-keys</a>.</div>
-        <div class="row"><input type="password" id="sOpenai" placeholder="${s.openai_key_set ? "•••••• — чтобы заменить, вставьте новый" : "sk-…"}" autocomplete="off">
-        <button class="ghost" id="sOpenaiSave">Сохранить</button>${s.openai_key_set ? '<button class="ghost" id="sOpenaiDel">Удалить</button>' : ""}</div>
-        ${keyCheckHtml("openai", s.openai_key_set)}</div>
-      <div class="field"><label for="sOpenaiModel">Модель ChatGPT</label>
-        <input type="text" id="sOpenaiModel" value="${esc(s.openai_model)}" placeholder="gpt-5"></div>
-      <div class="hint">Если модель устареет, приложение само возьмёт актуальную.</div>
-    </div>
-
-    <div class="card"><h2>Запись</h2>
-      <label class="check"><input type="checkbox" id="sAuto"${s.auto_record ? " checked" : ""}> Записывать встречи автоматически</label>
-      <div class="field" id="sPlatforms"${s.auto_record ? "" : " hidden"}>
-        ${IS_WIN ? "" : `<div class="radios" style="margin-bottom:8px">
-          <label class="check"><input type="radio" name="autoMode" value="auto"${(s.auto_record_mode || "auto") === "auto" ? " checked" : ""}> Начинать запись сразу</label>
-          <label class="check"><input type="radio" name="autoMode" value="ask"${s.auto_record_mode === "ask" ? " checked" : ""}> Спрашивать перед записью <span class="muted small">— всплывающая плашка с кнопкой «Записать»</span></label>
-        </div>`}
-        <div class="hint">Где замечать начало встречи:</div>
-        ${[["zoom", "Zoom", "по окну встречи (или микрофону без доступа к экрану)"], ["teams", "Microsoft Teams", "когда Teams включает микрофон"],
-           ["telemost", "Яндекс Телемост (программа)", "когда Телемост включает микрофон"],
-           ["meet", "Звонки в браузере", "Google Meet, Телемост, Teams, Jitsi, SaluteJazz, Контур.Толк"],
-           ["corp", "SaluteJazz, TrueConf, Контур.Толк, VK Звонки, DION", "когда программа включает микрофон"],
-           ["slack", "Slack", "Slack Huddles и звонки"],
-           ["discord", "Discord", "голосовые каналы и звонки"],
-           ...(IS_WIN ? [] : [["webex", "Webex", "встречи Cisco Webex"]]),
-           ["telegram", "Telegram", "звонки в приложении Telegram"],
-           ["whatsapp", "WhatsApp", "звонки в приложении WhatsApp"]]
-          .map(([id, t, d]) => `<label class="check"><input type="checkbox" data-platform="${id}"${(s.auto_platforms || []).includes(id) ? " checked" : ""}> ${t} <span class="muted small">— ${d}</span></label>`).join("")}
-        <div class="hint">${IS_WIN ? "Для Teams, Телемоста и браузера записывается весь звук компьютера."
-          : "Teams, Телемост, мессенджеры и браузер определяются по тому, кто пишет микрофон (нужна macOS 14.2+), записывается весь звук системы."}</div></div>
-      ${IS_WIN ? "" : `<label class="check"><input type="checkbox" id="sEcho"${s.echo_cancel ? " checked" : ""}> Подавлять эхо в микрофоне</label>
-      <div class="hint">Если говорите без наушников, голос собеседников из динамиков попадает в микрофон. Подавление эха macOS (и WebRTC AEC3 с GCC-PHAT после встречи) вычитает его. Действует со следующей записи.</div>
-      <label class="check"><input type="checkbox" id="sSkipContinuity"${s.skip_continuity_mic !== false ? " checked" : ""}> Не переключаться на микрофон iPhone (Continuity)</label>
-      <div class="hint">macOS иногда сама переводит микрофон на лежащий рядом iPhone. Приложение останется на микрофоне Mac или гарнитуре.</div>
-      <label class="check"><input type="checkbox" id="sPill"${s.recording_pill ? " checked" : ""}> Плашка записи поверх окон</label>
-      <div class="hint">Волна звука, время, пауза, «Стоп» и «✕ не записывать». Сворачивается в мини-капсулу; если микрофон молчит — ищет другой активный вход и предлагает переключиться в один клик.</div>`}
-      <label class="check"><input type="checkbox" id="sCalendar"${s.calendar_participants ? " checked" : ""}> Брать название и участников встречи из календаря</label>
-      <div class="hint">${IS_WIN ? "Из календаря Outlook (нужен установленный Outlook)." : "Из приложения «Календарь» (аккаунты Exchange, Google, iCloud — Системные настройки → Интернет-аккаунты)."}
-        Участники станут списком встречи, если вы не задали его вручную: это помогает подписать собеседников по именам. Календарь не меняется и никуда не отправляется.</div>
-      <div class="field"><label for="sTitles">Заголовки окна встречи Zoom</label>
-        <div class="hint">По ним приложение понимает, что встреча началась. Через запятую.</div>
-        <input type="text" id="sTitles" value="${esc(s.window_titles.join(", "))}"></div>
-      <label class="check"><input type="checkbox" id="sKeepAudio"${s.keep_audio ? " checked" : ""}> Хранить аудио после обработки (нужно, чтобы позже заново расшифровать)</label>
-      <label class="check" id="sCompressRow"${s.keep_audio ? "" : " hidden"} style="margin-left:22px"><input type="checkbox" id="sCompressAudio"${s.compress_audio !== false ? " checked" : ""}> Сжимать архивное аудио в M4A <span class="muted small">— ~20 МБ/час вместо 690 МБ</span></label>
-      <div class="hint">Заметки: ${esc(s.notes_dir)} · <button class="link" id="sReveal">Открыть папку</button></div>
-    </div>
-
-    <div class="card"><h2>Обновления и компоненты</h2>
-      <div class="hint">Код и интерфейс, ${IS_WIN ? "пакеты Python, " : ""}модели${IS_WIN ? ", ускорение NVIDIA" : ""} — в одном окне:
-        что установлено, что обновить, и кнопка «Обновить всё».</div>
-      <button class="ghost" type="button" id="sUpdates">Открыть «Обновления»${UPD.count ? ` (${UPD.count})` : ""}</button>
-      <button class="ghost" type="button" id="sDiag" style="margin-left:8px" title="Логи, версии и аудиоустройства — без текстов встреч, имён и ключей">Сохранить диагностику (.zip)</button></div>
-
-    <div class="card"><h2>Запись встреч и закон</h2>
-      <div class="hint">Приложение не уведомляет участников о записи. Предупреждайте их и сверяйтесь с правилами компании.</div></div>
+const stRow = (icon, title, desc, ctrl, cls = "") =>
+  `<div class="st-row${cls ? " " + cls : ""}">
+    <div class="st-ico">${ST_ICONS[icon] || ""}</div>
+    <div class="st-info"><div class="st-title">${title}</div>${desc ? `<div class="st-desc">${desc}</div>` : ""}</div>
+    ${ctrl ? `<div class="st-ctrl">${ctrl}</div>` : ""}
   </div>`;
 
-  bindBackendRadios($("settings"));
-  $("sUpdates").onclick = openUpdates;
-  if ($("sDiag")) $("sDiag").onclick = async () => {
-    try {
-      const r = await api("diagnostics", { method: "POST", body: {} });
-      toast(`Диагностика сохранена в «Загрузки»: ${r.name}`, 5000);
-    } catch (e) { toast(e.message); }
+const stSection = (title, body, right = "") =>
+  `<section class="st-section"><div class="st-head"><h2>${title}</h2>${right}</div><div class="st-group">${body}</div></section>`;
+
+let settingsTab = "general";
+
+function renderSettings() {
+  const s = S.settings;
+  if (!s) return;
+  const tabs = [
+    ["general", "sliders", "Общие"],
+    ["ai", "spark", "Протоколы и ИИ"],
+    ["speech", "mic", "Речь и голоса"],
+    ["system", "cpu", "Система"],
+  ];
+  const autoVal = !s.auto_record ? "off" : (!IS_WIN && s.auto_record_mode === "ask" ? "ask" : "auto");
+  const storageVal = !s.keep_audio ? "delete" : (s.compress_audio !== false ? "m4a" : "wav");
+  const themeVal = getTheme();
+  const platList = [
+    ["zoom", "Zoom"],
+    ["teams", "Teams"],
+    ["telemost", "Телемост"],
+    ["meet", "Браузер (Meet, Jitsi, РФ)"],
+    ["corp", "SaluteJazz, Толк, VK, DION, TrueConf"],
+    ["slack", "Slack"],
+    ["discord", "Discord"],
+    ...(IS_WIN ? [] : [["webex", "Webex"]]),
+    ["telegram", "Telegram"],
+    ["whatsapp", "WhatsApp"],
+  ];
+
+  const askDescs = {
+    "claude-code": "По подписке Claude, без доплаты. Фрагменты встреч уходят в облако Anthropic.",
+    "claude": "По ключу Claude API (ниже). Фрагменты уходят в облако Anthropic.",
+    "gemini": "По ключу Gemini API (ниже). Фрагменты уходят в облако Google.",
+    "openai": "По ключу OpenAI API (ниже). Фрагменты уходят в облако OpenAI.",
+    "local": `На ${PC}, ничего не уходит в интернет. Ответ 20–60 с.`,
   };
+
+  let body = "";
+  if (settingsTab === "general") {
+    body = stSection("Общие настройки", [
+      stRow("user", "Как вас зовут", "Распознавание точнее пишет обращение к вам, а протокол подписывает ваши задачи по имени",
+        `<input class="st-input" type="text" id="sMyName" maxlength="60" placeholder="Например, Ильяс" value="${esc(s.my_name || "")}">`),
+      stRow("calendar", "Участники из календаря",
+        IS_WIN ? "Брать название и участников из Outlook (если не заданы вручную)"
+               : "Брать название и участников из «Календаря» (Exchange, Google, iCloud)",
+        stSwitch("sCalendar", s.calendar_participants)),
+      stRow("record", "Автозапись встреч", "Что происходит при начале звонка",
+        `<select class="st-select" id="sAutoSelect">
+          <option value="off"${autoVal === "off" ? " selected" : ""}>Выключена</option>
+          <option value="auto"${autoVal === "auto" ? " selected" : ""}>Записывать сразу</option>
+          ${IS_WIN ? "" : `<option value="ask"${autoVal === "ask" ? " selected" : ""}>Предлагать запись</option>`}
+        </select>`),
+      `<div class="st-block" id="sPlatforms"${s.auto_record ? "" : " hidden"}>
+        <div class="st-desc">Где замечать начало встречи:</div>
+        <div class="plat-grid">${platList.map(([id, label]) => {
+          const on = (s.auto_platforms || []).includes(id);
+          return `<label class="plat-chip${on ? " on" : ""}"><input type="checkbox" data-platform="${id}"${on ? " checked" : ""}><span class="p-dot"></span>${esc(label)}</label>`;
+        }).join("")}</div>
+        <div class="st-desc" style="margin-top:9px">${IS_WIN
+          ? "Для Teams, Телемоста и браузера записывается звук компьютера и микрофон."
+          : "Teams, Телемост, мессенджеры и браузер определяются по микрофону (macOS 14.2+)."}</div>
+      </div>`,
+    ].join(""))
+    + (IS_WIN ? "" : stSection("Звук и интерфейс", [
+      stRow("wave", "Подавление эха", "Вычитает звук динамиков (macOS + офлайн AEC); в наушниках отключается автоматически",
+        stSwitch("sEcho", s.echo_cancel)),
+      stRow("phone", "Игнорировать микрофон iPhone", "Не переключаться на лежащий рядом iPhone (Continuity Camera)",
+        stSwitch("sSkipContinuity", s.skip_continuity_mic !== false)),
+      stRow("window", "Плашка записи поверх окон", "Волна звука, таймер, пауза, «Стоп» и быстрая смена микрофона",
+        stSwitch("sPill", s.recording_pill)),
+    ].join("")))
+    + stSection("Хранение записей", [
+      stRow("disk", "Хранение локальных записей", "Оставлять аудио на диске, чтобы позже пересоздать расшифровку",
+        `<select class="st-select" id="sStorageMode">
+          <option value="delete"${storageVal === "delete" ? " selected" : ""}>Удалять после обработки</option>
+          <option value="m4a"${storageVal === "m4a" ? " selected" : ""}>Сжимать в M4A (~20 МБ/ч)</option>
+          <option value="wav"${storageVal === "wav" ? " selected" : ""}>Хранить WAV (~690 МБ/ч)</option>
+        </select>`),
+      stRow("folder", "Папка с заметками", esc(s.notes_dir),
+        `<button class="st-icon-btn" type="button" id="sReveal" title="Открыть папку">${ST_ICONS.folder}</button>`),
+      stRow("palette", "Тема оформления", "Цветовая схема интерфейса",
+        `<select class="st-select" id="sTheme">
+          <option value="system"${themeVal === "system" ? " selected" : ""}>Как в системе</option>
+          <option value="dark"${themeVal === "dark" ? " selected" : ""}>Тёмная</option>
+          <option value="light"${themeVal === "light" ? " selected" : ""}>Светлая</option>
+        </select>`),
+      `<details class="st-adv"><summary>▸ Дополнительно: заголовки окна Zoom</summary>
+        <div class="st-adv-body">
+          <div class="st-desc" style="margin-bottom:6px">По ним приложение понимает, что встреча Zoom началась (через запятую).</div>
+          <input class="st-input wide" type="text" id="sTitles" value="${esc(s.window_titles.join(", "))}">
+        </div>
+      </details>`,
+    ].join(""));
+  } else if (settingsTab === "ai") {
+    body = stSection("Кто пишет протоколы", [
+      `<div class="st-block">${backendRadios(s)}</div>`,
+      stRow("doc", "Шаблон по умолчанию", "Инструкция для составления протокола новых встреч",
+        `<select class="st-select" id="sTemplate">${s.templates.map((t) =>
+          `<option value="${esc(t.id)}"${t.id === s.template ? " selected" : ""}>${esc(t.title)}${t.custom ? " (свой)" : ""}</option>`).join("")}</select>`),
+    ].join(""))
+    + stSection("Шаблоны протоколов",
+      s.templates.map((t) => `<div class="st-row">
+        <div class="st-ico">${ST_ICONS.doc}</div>
+        <div class="st-info"><div class="st-title">${esc(t.title)}
+          ${t.custom ? '<span class="badge ok">свой</span>' : '<span class="muted small">встроенный</span>'}</div></div>
+        <div class="st-ctrl">${t.custom
+          ? `<button class="st-btn" type="button" data-tpl-edit="${esc(t.id)}">Изменить</button>
+             <button class="st-btn" type="button" data-tpl-del="${esc(t.id)}">Удалить</button>`
+          : `<button class="st-btn" type="button" data-tpl-copy="${esc(t.id)}">Взять за основу</button>`}</div>
+      </div>`).join(""),
+      `<button class="st-head-act" type="button" id="tplNew">＋ Свой шаблон</button>`)
+    + stSection("Умный поиск", [
+      stRow("search", "Кто отвечает на вопросы", askDescs[s.ask_backend] || "Вопросы по встречам обычными словами (Enter в поле поиска)",
+        `<select class="st-select" id="sAskBackend">${Object.entries(s.ask_backends).map(([k, v]) =>
+          `<option value="${k}"${k === s.ask_backend ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>`),
+    ].join(""))
+    + stSection("Ключи облачных API", [
+      `<div class="st-block">
+        <div class="st-title">Gemini API ${s.gemini_key_set ? '<span class="badge ok">сохранён</span>' : ""}</div>
+        <div class="st-desc">Ключ создаётся на <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>.</div>
+        <div class="st-key-row"><input class="st-input" type="password" id="sGemini" placeholder="${s.gemini_key_set ? "•••••• — вставьте новый, чтобы заменить" : "AIza…"}" autocomplete="off">
+          <button class="st-btn" type="button" id="sGeminiSave">Сохранить</button>
+          ${s.gemini_key_set ? '<button class="st-btn" type="button" id="sGeminiDel">Удалить</button>' : ""}</div>
+        ${keyCheckHtml("gemini", s.gemini_key_set)}
+        ${s.gemini_key_set ? geminiModelField(s) : ""}
+      </div>`,
+      `<div class="st-block">
+        <div class="st-title">OpenAI (ChatGPT) API ${s.openai_key_set ? '<span class="badge ok">сохранён</span>' : ""}</div>
+        <div class="st-desc">Ключ создаётся на <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com/api-keys</a>.</div>
+        <div class="st-key-row"><input class="st-input" type="password" id="sOpenai" placeholder="${s.openai_key_set ? "•••••• — вставьте новый, чтобы заменить" : "sk-…"}" autocomplete="off">
+          <button class="st-btn" type="button" id="sOpenaiSave">Сохранить</button>
+          ${s.openai_key_set ? '<button class="st-btn" type="button" id="sOpenaiDel">Удалить</button>' : ""}</div>
+        ${keyCheckHtml("openai", s.openai_key_set)}
+        <div class="st-key-row" style="margin-top:10px"><span class="muted small">Модель:</span>
+          <input class="st-input" type="text" id="sOpenaiModel" value="${esc(s.openai_model)}" placeholder="gpt-5"></div>
+      </div>`,
+      `<div class="st-block">
+        <div class="st-title">Claude API ${s.anthropic_key_set ? '<span class="badge ok">сохранён</span>' : ""}</div>
+        <div class="st-desc">Оплата на platform.claude.com, отдельно от подписки. Claude Code:
+          ${s.claude_code_path ? `<span class="badge ok">найден</span>` : '<span class="badge warn">не установлен</span>'}</div>
+        <div class="st-key-row"><input class="st-input" type="password" id="sKey" placeholder="${s.anthropic_key_set ? "•••••• — вставьте новый, чтобы заменить" : "sk-ant-…"}" autocomplete="off">
+          <button class="st-btn" type="button" id="sKeySave">Сохранить</button>
+          ${s.anthropic_key_set ? '<button class="st-btn" type="button" id="sKeyDel">Удалить</button>' : ""}</div>
+        ${keyCheckHtml("claude", s.anthropic_key_set)}
+      </div>`,
+    ].join(""));
+  } else if (settingsTab === "speech") {
+    body = stSection("Распознавание речи", [
+      `<div class="st-block"><div class="st-desc">Всё работает локально на ${PC}.</div>${asrRadios(s)}</div>`,
+      stRow("bolt", "Распознавать по ходу встречи",
+        `С ${IS_WIN ? "GigaAM" : "GigaAM и Whisper turbo"} на пониженном приоритете — протокол готов быстрее (от батареи паузится)`,
+        stSwitch("sLive", s.live_enabled)),
+      `<div class="st-block">
+        <div class="st-title">${ST_ICONS.book.replace("<svg ", '<svg style="width:15px;height:15px;opacity:.7" ')} Глоссарий терминов и имён</div>
+        <div class="st-desc">Через запятую. Пополняется сам, когда вы правите имя или термин в расшифровке.${s.asr_engine === "gigaam"
+          ? " С GigaAM похожие слова перепроверяются Whisper." : ""}</div>
+        <textarea class="st-textarea" id="sGlossary" placeholder="Например: ЦБ, GigaAM, Ильяс, Сковиков">${esc(s.glossary.join(", "))}</textarea>
+      </div>`,
+    ].join(""))
+    + stSection("Разделение собеседников и голоса", [
+      stRow("users", "Разделять собеседников по голосам", "Подписывает «Собеседник 1», «Собеседник 2»… Ваша речь всегда «Я»",
+        stSwitch("sDiar", s.diarization_enabled)),
+      stRow("user", "Узнавать по базе «Голоса»", "Автоматически подставлять сохранённые имена коллег",
+        stSwitch("sVoices", s.voices_enabled, !s.diarization_enabled), s.diarization_enabled ? "" : "disabled"),
+      stRow("spark", "Угадывать имена из разговора", "Если имя не в базе голосов — отмечается звёздочкой «Олег*»",
+        stSwitch("sGuess", s.names_guess, !s.diarization_enabled), s.diarization_enabled ? "" : "disabled"),
+      `<div class="st-block">
+        <div class="st-title">Токен Hugging Face ${s.hf_token_set ? '<span class="badge ok">сохранён</span>' : ""}</div>
+        <div class="st-desc">Нужен бесплатный токен типа Read и согласие («Agree») для
+          <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank">speaker-diarization-3.1</a> и
+          <a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank">segmentation-3.0</a>.</div>
+        <div class="st-key-row"><input class="st-input" type="password" id="sHf" placeholder="${s.hf_token_set ? "•••••• — вставьте новый, чтобы заменить" : "hf_…"}" autocomplete="off">
+          <button class="st-btn" type="button" id="sHfSave">Сохранить</button>
+          <button class="st-btn" type="button" id="sHfCheck"${s.hf_token_set ? "" : " disabled"}>Проверить</button></div>
+        <div id="sHfResult" class="st-desc" style="margin-top:8px"></div>
+      </div>`,
+    ].join(""));
+  } else {
+    const curVer = (S.status && S.status.updates && S.status.updates.version) ? `v${esc(S.status.updates.version)}` : "";
+    body = stSection("Обновления и диагностика", [
+      stRow("refresh", "Обновления и компоненты",
+        `Код и интерфейс, ${IS_WIN ? "пакеты Python, " : ""}модели${IS_WIN ? " и ускорение NVIDIA" : ""}`,
+        `<button class="st-btn" type="button" id="sUpdates">Открыть${UPD.count ? ` (${UPD.count})` : ""}</button>`),
+      stRow("doc", "Логи и диагностика приложения",
+        "Обезличенный .zip с логами, версиями и аудиоустройствами — без текстов встреч, имён и ключей",
+        `<button class="st-icon-btn" type="button" id="sDiagFolder" title="Открыть папку с логами">${ST_ICONS.folder}</button>
+         <button class="st-btn" type="button" id="sDiag">Сохранить</button>`),
+    ].join(""), curVer ? `<span class="muted small">${curVer}</span>` : "")
+    + `<div class="st-legal">${ST_ICONS.shield}<span><b>Запись встреч и закон:</b> приложение не уведомляет участников о записи. Предупреждайте коллег и сверяйтесь с правилами компании.</span></div>`;
+  }
+
+  $("settings").innerHTML = `<div class="st-page">
+    <div class="st-top">
+      <h1>Настройки</h1>
+      <div class="st-tabs" role="tablist">${tabs.map(([id, ico, label]) =>
+        `<button class="st-tab${settingsTab === id ? " active" : ""}" type="button" data-st-tab="${id}">
+          ${ST_ICONS[ico]}<span>${label}</span>${id === "system" && UPD.count ? `<span class="dot-badge">${UPD.count}</span>` : ""}
+        </button>`).join("")}</div>
+    </div>
+    ${body}
+  </div>`;
+
+  $("settings").querySelectorAll("[data-st-tab]").forEach((b) => b.onclick = () => {
+    settingsTab = b.dataset.stTab;
+    renderSettings();
+  });
+
+  bindBackendRadios($("settings"));
   const save = async (body, msg = "Сохранено") => {
     try {
       S.settings = await api("settings", { method: "POST", body });
@@ -2239,8 +2461,17 @@ function renderSettings() {
     }
   };
   const list = (v) => v.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
-  $("sTemplate").onchange = (e) => save({ template: e.target.value });
-  $("tplNew").onclick = () => openTemplate(null);
+
+  if ($("sUpdates")) $("sUpdates").onclick = openUpdates;
+  if ($("sDiagFolder")) $("sDiagFolder").onclick = () => api("reveal", { method: "POST", body: { kind: "logs" } });
+  if ($("sDiag")) $("sDiag").onclick = async () => {
+    try {
+      const r = await api("diagnostics", { method: "POST", body: {} });
+      toast(`Диагностика сохранена в «Загрузки»: ${r.name}`, 5000);
+    } catch (e) { toast(e.message); }
+  };
+  if ($("sTemplate")) $("sTemplate").onchange = (e) => save({ template: e.target.value });
+  if ($("tplNew")) $("tplNew").onclick = () => openTemplate(null);
   $("settings").querySelectorAll("[data-tpl-edit]").forEach((b) => b.onclick = () => openTemplate(b.dataset.tplEdit));
   $("settings").querySelectorAll("[data-tpl-copy]").forEach((b) => b.onclick = () => openTemplate(b.dataset.tplCopy, true));
   $("settings").querySelectorAll("[data-tpl-del]").forEach((b) => b.onclick = async () => {
@@ -2253,54 +2484,63 @@ function renderSettings() {
       toast("Шаблон удалён");
     } catch (e) { toast(e.message); }
   });
-  $("sGlossary").onchange = (e) => save({ glossary: list(e.target.value) });
-  $("sMyName").onchange = (e) => save({ my_name: e.target.value.trim() }, e.target.value.trim() ? `Запомнил: вас зовут ${e.target.value.trim()}` : "Имя убрано");
-  $("sTitles").onchange = (e) => save({ window_titles: list(e.target.value) });
-  $("sDiar").onchange = async (e) => { await save({ diarization_enabled: e.target.checked }); renderSettings(); loadVoices(true); };
-  $("sVoices").onchange = (e) => { save({ voices_enabled: e.target.checked }); loadVoices(true); };
-  $("sGuess").onchange = (e) => save({ names_guess: e.target.checked });
-  $("sLive").onchange = (e) => save({ live_enabled: e.target.checked });
-  $("settings").querySelectorAll('input[name="askBackend"]').forEach((r) => r.addEventListener("change", async () => {
-    if (await save({ ask_backend: r.value }, "Умный поиск: " + s.ask_backends[r.value])) renderSettings();
-  }));
-  $("sGeminiSave").onclick = async () => {
+  if ($("sGlossary")) $("sGlossary").onchange = (e) => save({ glossary: list(e.target.value) });
+  if ($("sMyName")) $("sMyName").onchange = (e) => save({ my_name: e.target.value.trim() }, e.target.value.trim() ? `Запомнил: вас зовут ${e.target.value.trim()}` : "Имя убрано");
+  if ($("sTitles")) $("sTitles").onchange = (e) => save({ window_titles: list(e.target.value) });
+  if ($("sDiar")) $("sDiar").onchange = async (e) => { await save({ diarization_enabled: e.target.checked }); renderSettings(); loadVoices(true); };
+  if ($("sVoices")) $("sVoices").onchange = (e) => { save({ voices_enabled: e.target.checked }); loadVoices(true); };
+  if ($("sGuess")) $("sGuess").onchange = (e) => save({ names_guess: e.target.checked });
+  if ($("sLive")) $("sLive").onchange = (e) => save({ live_enabled: e.target.checked });
+  if ($("sAskBackend")) $("sAskBackend").onchange = async (e) => {
+    if (await save({ ask_backend: e.target.value }, "Умный поиск: " + s.ask_backends[e.target.value])) renderSettings();
+  };
+  if ($("sGeminiSave")) $("sGeminiSave").onclick = async () => {
     const v = $("sGemini").value.trim();
     if (v && await save({ gemini_key: v }, "Ключ Gemini сохранён")) { S.geminiModels = undefined; renderSettings(); checkKey("gemini"); }
   };
   if ($("sGeminiDel")) $("sGeminiDel").onclick = async () => { if (await save({ gemini_key: "" }, "Ключ Gemini удалён")) renderSettings(); };
-  $("sOpenaiSave").onclick = async () => {
+  if ($("sOpenaiSave")) $("sOpenaiSave").onclick = async () => {
     const v = $("sOpenai").value.trim();
     if (v && await save({ openai_key: v }, "Ключ OpenAI сохранён")) { renderSettings(); checkKey("openai"); }
   };
   if ($("sOpenaiDel")) $("sOpenaiDel").onclick = async () => { if (await save({ openai_key: "" }, "Ключ OpenAI удалён")) renderSettings(); };
-  $("sOpenaiModel").onchange = (e) => { if (e.target.value.trim()) { delete S.keyCheck.openai; save({ openai_model: e.target.value }, "Модель ChatGPT: " + e.target.value.trim()); } };
-  $("sAuto").onchange = (e) => { save({ auto_record: e.target.checked }); native("reloadSettings"); $("sPlatforms").hidden = !e.target.checked; };
-  $("settings").querySelectorAll('input[name="autoMode"]').forEach((r) => r.onchange = async () => {
-    await save({ auto_record_mode: r.value });
+  if ($("sOpenaiModel")) $("sOpenaiModel").onchange = (e) => { if (e.target.value.trim()) { delete S.keyCheck.openai; save({ openai_model: e.target.value }, "Модель ChatGPT: " + e.target.value.trim()); } };
+  if ($("sAutoSelect")) $("sAutoSelect").onchange = async (e) => {
+    const v = e.target.value;
+    const payload = IS_WIN ? { auto_record: v !== "off" } : { auto_record: v !== "off", auto_record_mode: v === "ask" ? "ask" : "auto" };
+    await save(payload);
     native("reloadSettings");
-  });
+    if ($("sPlatforms")) $("sPlatforms").hidden = v === "off";
+  };
   $("settings").querySelectorAll("[data-platform]").forEach((c) => c.onchange = async () => {
-    const list = [...$("settings").querySelectorAll("[data-platform]:checked")].map((x) => x.dataset.platform);
-    await save({ auto_platforms: list });
+    c.closest(".plat-chip").classList.toggle("on", c.checked);
+    const pl = [...$("settings").querySelectorAll("[data-platform]:checked")].map((x) => x.dataset.platform);
+    await save({ auto_platforms: pl });
     native("reloadSettings");
   });
+  if ($("sStorageMode")) $("sStorageMode").onchange = (e) => {
+    const v = e.target.value;
+    save({ keep_audio: v !== "delete", compress_audio: v === "m4a" });
+  };
+  if ($("sTheme")) $("sTheme").onchange = (e) => {
+    applyTheme(e.target.value);
+    toast("Тема обновлена");
+  };
   if ($("sEcho")) $("sEcho").onchange = async (e) => { await save({ echo_cancel: e.target.checked }); native("reloadSettings"); };
   if ($("sSkipContinuity")) $("sSkipContinuity").onchange = async (e) => { await save({ skip_continuity_mic: e.target.checked }); native("reloadSettings"); };
   if ($("sPill")) $("sPill").onchange = async (e) => { await save({ recording_pill: e.target.checked }); native("reloadSettings"); };
-  $("sCalendar").onchange = async (e) => {
+  if ($("sCalendar")) $("sCalendar").onchange = async (e) => {
     await save({ calendar_participants: e.target.checked }, e.target.checked ? "Участники будут браться из календаря" : "Календарь не используется");
     if (e.target.checked) native("calendarAccess");
     native("reloadSettings");
   };
-  $("sKeepAudio").onchange = (e) => { save({ keep_audio: e.target.checked }); if ($("sCompressRow")) $("sCompressRow").hidden = !e.target.checked; };
-  if ($("sCompressAudio")) $("sCompressAudio").onchange = (e) => save({ compress_audio: e.target.checked });
-  $("sReveal").onclick = () => api("reveal", { method: "POST", body: {} });
-  $("sHfSave").onclick = async () => {
+  if ($("sReveal")) $("sReveal").onclick = () => api("reveal", { method: "POST", body: {} });
+  if ($("sHfSave")) $("sHfSave").onclick = async () => {
     const v = $("sHf").value.trim();
     if (v && await save({ hf_token: v }, "Токен сохранён")) { renderSettings(); checkHf(); }
   };
-  $("sHfCheck").onclick = checkHf;
-  $("sKeySave").onclick = async () => {
+  if ($("sHfCheck")) $("sHfCheck").onclick = checkHf;
+  if ($("sKeySave")) $("sKeySave").onclick = async () => {
     const v = $("sKey").value.trim();
     if (v && await save({ anthropic_key: v }, "Ключ сохранён")) { renderSettings(); checkKey("claude"); }
   };
