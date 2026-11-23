@@ -11,9 +11,12 @@
   <aside id="sidebar">
     <div class="side-head">
       <div class="brand">Встречи</div>
-      <button id="recordBtn" class="rec-btn" title="Записать сейчас (весь звук системы и микрофон)">
-        <span class="dot"></span><span class="label">Записать</span>
-      </button>
+      <div class="rec-group">
+        <button id="micOnlyBtn" class="ghost mic-only-btn" title="Записать только микрофон (очная встреча / диктофон)">🎙</button>
+        <button id="recordBtn" class="rec-btn" title="Записать сейчас (весь звук системы и микрофон)">
+          <span class="dot"></span><span class="label">Записать</span>
+        </button>
+      </div>
     </div>
     <div id="recBanner" class="rec-banner" hidden>
       <span class="pulse"></span>

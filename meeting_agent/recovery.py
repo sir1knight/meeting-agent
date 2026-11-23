@@ -88,7 +88,7 @@ def recover(folder: Path) -> bool:
     meta["recovered"] = True
     osutil.atomic_write_text(meta_path, json.dumps(meta, ensure_ascii=False, indent=2))
     try:
-        (folder / LOCK).unlink()
+        osutil.safe_unlink(folder / LOCK)
     except OSError:
         pass
     log.info("Восстановлена прерванная запись %s (%s)", folder.name, "есть звук" if ok else "пустая")
@@ -102,6 +102,6 @@ def write_lock(folder: Path, target: str) -> None:
 
 def remove_lock(folder: Path) -> None:
     try:
-        (folder / LOCK).unlink()
+        osutil.safe_unlink(folder / LOCK)
     except OSError:
         pass

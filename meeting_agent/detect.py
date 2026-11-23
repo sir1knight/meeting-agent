@@ -34,7 +34,10 @@ CALL_APPS = {
 CORP = ("jazz", "trueconf", "ktalk", "vkcalls", "dion", "webex")
 MESSENGERS = ("slack", "discord", "telegram", "whatsapp")
 WEB_CALL_TITLES = ("meet.google.com", "google meet", "meet –", "meet -", "телемост", "telemost", "microsoft teams",
-                   "teams.microsoft", "jitsi", "jazz", "контур.толк", "webex", "huddle", "slack", "discord")
+                   "teams.microsoft", "jitsi", "jazz", "salutejazz", "sberjazz", "контур.толк", "ktalk",
+                   "talk.kontur", "vk звонки", "calls.vk", "мтс линк", "mts-link", "webinar.ru",
+                   "сферум", "sferum", "pruffme", "trueconf", "dion", "whereby", "webex", "huddle",
+                   "slack", "discord")
 
 
 def mic_users_win() -> list[str]:
@@ -182,6 +185,14 @@ def render_sessions_win() -> list[tuple[str, str]]:
         return []
 
 
+def capture_sessions_win() -> list[tuple[str, str]]:
+    """[(device_id, exe_lower), ...] для программ, которые сейчас пишут звук с любого микрофона."""
+    try:
+        return _sessions_by_flow(1)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def default_endpoint_id(data_flow: int = 0, role: int = 0) -> str | None:
     """ID устройства по умолчанию: data_flow 0=eRender / 1=eCapture; role 0=eConsole, 2=eCommunications."""
     import ctypes
@@ -200,27 +211,42 @@ def default_endpoint_id(data_flow: int = 0, role: int = 0) -> str | None:
         _release(enum)
 
 
+def _wanted_exes(source: str | None) -> tuple[str, ...]:
+    if source == "zoom":
+        return ("zoom.exe", "cpthost.exe")
+    if source == "meet":
+        return BROWSERS
+    if source and source in CALL_APPS:
+        return CALL_APPS[source]
+    return ("zoom.exe",) + BROWSERS + tuple(x for v in CALL_APPS.values() for x in v)
+
+
 def meeting_render_device_id(source: str | None = None) -> str | None:
     """Находит ID именно того устройства вывода (гарнитура / eCommunications / динамики),
     в которое сейчас идёт звук встречи — даже если системный вывод по умолчанию другой."""
     if not IS_WIN:
         return None
-    sessions = render_sessions_win()
-    wanted: tuple[str, ...] = ()
-    if source == "zoom":
-        wanted = ("zoom.exe", "cpthost.exe")
-    elif source == "meet":
-        wanted = BROWSERS
-    elif source and source in CALL_APPS:
-        wanted = CALL_APPS[source]
-    else:
-        wanted = ("zoom.exe",) + BROWSERS + tuple(x for v in CALL_APPS.values() for x in v)
-
-    for dev_id, exe in sessions:
+    wanted = _wanted_exes(source)
+    for dev_id, exe in render_sessions_win():
         if dev_id and any(w in exe for w in wanted):
             return dev_id
     # Если активной сессии ещё нет, для звонка предпочитаем устройство связи (eCommunications), иначе eConsole.
     return default_endpoint_id(0, 2) or default_endpoint_id(0, 0)
+
+
+def meeting_capture_device_id(source: str | None = None) -> str | None:
+    """Находит ID микрофона, с которого реально пишет программа встречи (Bluetooth-гарнитура / спикерфон
+    в роли eCommunications), даже если системный микрофон по умолчанию (eConsole) — встроенный микрофон ноутбука."""
+    if not IS_WIN:
+        return None
+    if source == "mic_only":
+        return default_endpoint_id(1, 0)
+    wanted = _wanted_exes(source)
+    for dev_id, exe in capture_sessions_win():
+        if dev_id and any(w in exe for w in wanted):
+            return dev_id
+    # Если микрофон в звонке ещё замьючен — предпочитаем устройство связи (eCommunications), иначе eConsole.
+    return default_endpoint_id(1, 2) or default_endpoint_id(1, 0)
 
 
 def is_render_device_muted(device_id: str | None = None) -> bool:

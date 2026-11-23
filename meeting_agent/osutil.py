@@ -28,7 +28,13 @@ if IS_WIN:
     _k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
                                                 ctypes.POINTER(wintypes.DWORD)]
     _k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    _k32.SetThreadExecutionState.argtypes = [wintypes.DWORD]
+    _k32.SetThreadExecutionState.restype = wintypes.DWORD
+    _k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    _k32.TerminateProcess.restype = wintypes.BOOL
     CREATE_NO_WINDOW = 0x08000000
+    _ES_CONTINUOUS = 0x80000000
+    _ES_SYSTEM_REQUIRED = 0x00000001
 
 
 def popen_kwargs() -> dict:
@@ -156,8 +162,67 @@ def empty_cache(device) -> None:
         torch.cuda.empty_cache()
 
 
+def prevent_sleep(active: bool) -> None:
+    """Windows: не давать системе засыпать по простою, пока идёт запись встречи."""
+    if not IS_WIN:
+        return
+    try:
+        flags = (_ES_CONTINUOUS | _ES_SYSTEM_REQUIRED) if active else _ES_CONTINUOUS
+        _k32.SetThreadExecutionState(flags)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def terminate_process(pid: int) -> bool:
+    """Принудительно завершает зависший процесс (Windows: TerminateProcess)."""
+    if not IS_WIN or pid <= 0 or pid == os.getpid():
+        return False
+    PROCESS_TERMINATE = 0x0001
+    h = _k32.OpenProcess(PROCESS_TERMINATE, False, pid)
+    if not h:
+        return False
+    try:
+        return bool(_k32.TerminateProcess(h, 1))
+    finally:
+        _k32.CloseHandle(h)
+
+
+def retry_win_fs(fn, *args, max_attempts: int = 6, max_elapsed: float = 2.0):
+    """Повторяет файловую операцию на Windows, если файл временно занят антивирусом/индексатором
+    или другим читателем (EPERM / EACCES / EBUSY / WinError 5, 32, 33)."""
+    if not IS_WIN:
+        return fn(*args)
+    import errno
+    import time
+
+    retry_errnos = {errno.EPERM, errno.EACCES, errno.EBUSY}
+    retry_winerrors = {5, 32, 33}
+    started = time.monotonic()
+    delay = 0.05
+    for attempt in range(max_attempts):
+        try:
+            return fn(*args)
+        except OSError as e:
+            is_transient = (isinstance(e, PermissionError)
+                            or getattr(e, "errno", None) in retry_errnos
+                            or getattr(e, "winerror", None) in retry_winerrors)
+            if not is_transient or attempt + 1 >= max_attempts or time.monotonic() - started >= max_elapsed:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2.0, 0.5)
+
+
+def safe_unlink(path) -> None:
+    """Удаляет файл с retry на Windows, игнорируя уже удалённый файл."""
+    try:
+        retry_win_fs(os.unlink, str(path))
+    except FileNotFoundError:
+        pass
+
+
 def atomic_write_text(path, text: str) -> None:
-    """Запись файла через временный рядом и замену: при сбое остаётся старая версия, а не обрывок."""
+    """Запись файла через временный рядом и замену: при сбое остаётся старая версия, а не обрывок.
+    На Windows делает retry при временной блокировке файла антивирусом или индексатором."""
     import tempfile
     from pathlib import Path
 
@@ -169,10 +234,10 @@ def atomic_write_text(path, text: str) -> None:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        retry_win_fs(os.replace, tmp, path)
     except BaseException:
         try:
-            os.unlink(tmp)
+            safe_unlink(tmp)
         except OSError:
             pass
         raise

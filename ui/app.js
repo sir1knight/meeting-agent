@@ -418,6 +418,7 @@ function renderMeeting() {
     highlightPlaying(true);
   }
   if ($("staleRedo")) $("staleRedo").onclick = () => redoProtocol();
+  if ($("staleLight")) $("staleLight").onclick = () => redoProtocol("gemini", $("staleLight").dataset.model);
   if ($("staleQwen")) $("staleQwen").onclick = () => redoProtocol("local");
   $("redoBtn").disabled = !m.source;
   if (SUMEDIT.id && SUMEDIT.id !== m.id) SUMEDIT.id = null;
@@ -1080,18 +1081,29 @@ $("assignDialog").addEventListener("close", async () => {
   }
 });
 
-// Облачная модель не составила протокол (перегрузка, лимит, нет связи) — составить на Qwen на компьютере.
+// Облачная модель не составила протокол (перегрузка, лимит, нет связи) — предложить модель полегче или Qwen.
 function protocolFallbackHtml(m) {
+  if (!/перегруж|лимит|429|50[0234]|Нет связи|timed out|timeout|не ответил/i.test(m.protocol_error || "")) return "";
+  const btns = [];
+  const backend = m.llm || (S.settings && S.settings.llm_backend) || "";
+  if (backend === "gemini") {
+    const cur = (S.settings && S.settings.gemini_model) || "";
+    const light = GEMINI_LIGHT.find((x) => x !== cur);
+    if (light) btns.push(`<button class="ghost" id="staleLight" data-model="${esc(light)}" title="Более лёгкая бесплатная модель Gemini">Составить на ${esc(light)}</button>`);
+  }
   const qwen = S.status && S.status.models && S.status.models.llm && S.status.models.llm.status === "ready";
-  const cloud = m.llm && m.llm !== "local";
-  return qwen && cloud && /перегруж|лимит|429|50[0234]|Нет связи|timed out|timeout|не ответил/i.test(m.protocol_error || "")
-    ? ` <button class="ghost" id="staleQwen" title="Ничего не уходит в интернет">Составить на Qwen (на ${PC})</button>` : "";
+  if (backend && backend !== "local" && qwen) {
+    btns.push(`<button class="ghost" id="staleQwen" title="Ничего не уходит в интернет">Составить на Qwen (на ${PC})</button>`);
+  }
+  return btns.length ? " " + btns.join(" ") : "";
 }
 
-async function redoProtocol(llm) {
+async function redoProtocol(llm, geminiModel) {
   try {
-    await api("reprocess", { method: "POST", body: { id: S.current.id, template: S.current.template || undefined,
-                                                     llm: typeof llm === "string" ? llm : undefined } });
+    const body = { id: S.current.id, template: S.current.template || undefined,
+                   llm: typeof llm === "string" ? llm : undefined };
+    if (geminiModel) body.gemini_model = geminiModel;
+    await api("reprocess", { method: "POST", body });
     toast("Протокол пересоздаётся — это видно в списке слева");
     pollStatus();
   } catch (e) {
@@ -1455,6 +1467,10 @@ $("recordBtn").addEventListener("click", () => {
   native(rec && rec.state === "recording" ? "stopRecording" : "startRecording");
   setTimeout(pollStatus, 600);
 });
+if ($("micOnlyBtn")) $("micOnlyBtn").addEventListener("click", () => {
+  native("startMicOnly");
+  setTimeout(pollStatus, 600);
+});
 $("recStop").addEventListener("click", () => { native("stopRecording"); setTimeout(pollStatus, 600); });
 if ($("recPause")) $("recPause").addEventListener("click", () => { native("togglePause"); setTimeout(pollStatus, 400); });
 
@@ -1464,6 +1480,7 @@ function renderRecording() {
   const paused = !!(on && rec.paused);
   $("recordBtn").classList.toggle("recording", on);
   $("recordBtn").querySelector(".label").textContent = on ? "Стоп" : "Записать";
+  if ($("micOnlyBtn")) $("micOnlyBtn").hidden = on;
   $("recBanner").hidden = !on;
   $("recBanner").classList.toggle("paused", paused);
   if ($("recPause")) {
@@ -1477,8 +1494,10 @@ function renderRecording() {
     const t = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
     const PLAT = { zoom: "Zoom", teams: "Teams", telemost: "Телемоста", meet: "в браузере",
       slack: "Slack", discord: "Discord", webex: "Webex", telegram: "Telegram", whatsapp: "WhatsApp",
-      jazz: "SaluteJazz", trueconf: "TrueConf", ktalk: "Контур.Толка", vkcalls: "VK Звонков", dion: "Дион" };
-    const head = paused ? "Пауза" : (PLAT[rec.source] ? "Запись встречи " + PLAT[rec.source] : "Идёт запись");
+      jazz: "SaluteJazz", trueconf: "TrueConf", ktalk: "Контур.Толка", vkcalls: "VK Звонков", dion: "DION",
+      mic_only: "только микрофон" };
+    const head = paused ? "Пауза" : (rec.source === "mic_only" ? "Запись (только микрофон)"
+      : (PLAT[rec.source] ? "Запись встречи " + PLAT[rec.source] : "Идёт запись"));
     $("recText").textContent = `${head} · ${t}`;
   }
   $("recWarn").hidden = !(on && rec.warning);
@@ -2156,17 +2175,12 @@ function renderSettings() {
         ${[["zoom", "Zoom", "по окну встречи (или микрофону без доступа к экрану)"], ["teams", "Microsoft Teams", "когда Teams включает микрофон"],
            ["telemost", "Яндекс Телемост (программа)", "когда Телемост включает микрофон"],
            ["meet", "Звонки в браузере", "Google Meet, Телемост, Teams, Jitsi, SaluteJazz, Контур.Толк"],
-           ...(IS_WIN
-             ? [["corp", "SaluteJazz, TrueConf, Контур.Толк, VK Звонки, Дион, Webex", "когда программа включает микрофон"],
-                ["slack", "Slack", "Slack Huddles и звонки"],
-                ["discord", "Discord", "голосовые каналы и звонки"],
-                ["telegram", "Telegram", "звонки в приложении Telegram"],
-                ["whatsapp", "WhatsApp", "звонки в приложении WhatsApp"]]
-             : [["slack", "Slack", "Slack Huddles и звонки"],
-                ["discord", "Discord", "голосовые каналы и звонки"],
-                ["webex", "Webex", "встречи Cisco Webex"],
-                ["telegram", "Telegram", "звонки в приложении Telegram"],
-                ["whatsapp", "WhatsApp", "звонки в приложении WhatsApp"]])]
+           ["corp", "SaluteJazz, TrueConf, Контур.Толк, VK Звонки, DION", "когда программа включает микрофон"],
+           ["slack", "Slack", "Slack Huddles и звонки"],
+           ["discord", "Discord", "голосовые каналы и звонки"],
+           ...(IS_WIN ? [] : [["webex", "Webex", "встречи Cisco Webex"]]),
+           ["telegram", "Telegram", "звонки в приложении Telegram"],
+           ["whatsapp", "WhatsApp", "звонки в приложении WhatsApp"]]
           .map(([id, t, d]) => `<label class="check"><input type="checkbox" data-platform="${id}"${(s.auto_platforms || []).includes(id) ? " checked" : ""}> ${t} <span class="muted small">— ${d}</span></label>`).join("")}
         <div class="hint">${IS_WIN ? "Для Teams, Телемоста и браузера записывается весь звук компьютера."
           : "Teams, Телемост, мессенджеры и браузер определяются по тому, кто пишет микрофон (нужна macOS 14.2+), записывается весь звук системы."}</div></div>
@@ -2190,7 +2204,8 @@ function renderSettings() {
     <div class="card"><h2>Обновления и компоненты</h2>
       <div class="hint">Код и интерфейс, ${IS_WIN ? "пакеты Python, " : ""}модели${IS_WIN ? ", ускорение NVIDIA" : ""} — в одном окне:
         что установлено, что обновить, и кнопка «Обновить всё».</div>
-      <button class="ghost" type="button" id="sUpdates">Открыть «Обновления»${UPD.count ? ` (${UPD.count})` : ""}</button></div>
+      <button class="ghost" type="button" id="sUpdates">Открыть «Обновления»${UPD.count ? ` (${UPD.count})` : ""}</button>
+      <button class="ghost" type="button" id="sDiag" style="margin-left:8px" title="Логи, версии и аудиоустройства — без текстов встреч, имён и ключей">Сохранить диагностику (.zip)</button></div>
 
     <div class="card"><h2>Запись встреч и закон</h2>
       <div class="hint">Приложение не уведомляет участников о записи. Предупреждайте их и сверяйтесь с правилами компании.</div></div>
@@ -2198,6 +2213,12 @@ function renderSettings() {
 
   bindBackendRadios($("settings"));
   $("sUpdates").onclick = openUpdates;
+  if ($("sDiag")) $("sDiag").onclick = async () => {
+    try {
+      const r = await api("diagnostics", { method: "POST", body: {} });
+      toast(`Диагностика сохранена в «Загрузки»: ${r.name}`, 5000);
+    } catch (e) { toast(e.message); }
+  };
   const save = async (body, msg = "Сохранено") => {
     try {
       S.settings = await api("settings", { method: "POST", body });

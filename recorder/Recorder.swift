@@ -219,6 +219,13 @@ enum CoreAudioTools {
         return (defID, defInfo?.name ?? "", nil)
     }
 
+    /// Свободное место на диске (в байтах) для папки записи.
+    static func freeDiskSpaceBytes(for folder: URL) -> Int64? {
+        let probe = FileManager.default.fileExists(atPath: folder.path) ? folder : folder.deletingLastPathComponent()
+        return (try? probe.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?
+            .volumeAvailableCapacityForImportantUsage
+    }
+
     /// В наушниках и на Bluetooth-гарнитурах (AirPods 24 кГц) Voice Processing macOS не нужен (нет эха
     /// от динамиков) и при одновременной работе с Zoom может отдавать сплошные нули.
     static func shouldSkipVoiceProcessing(inputID: AudioDeviceID) -> Bool {
@@ -497,6 +504,8 @@ final class AppAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private var resync = false           // после перезапуска: пропуск — по часам, а не по меткам потока
     private var paused = false
     private var resetPTSAfterPause = false
+    private var fadeInRemaining = 0
+    private var fadeInTotal = 0
     private var health = TrackHealth()
     private var liveRms: Float = 0
     private var target = "all"
@@ -715,7 +724,11 @@ final class AppAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
         try? await stream?.stopCapture()
         stream = nil
         cleanupProcessTap()
-        queue.sync { self.resync = self.file != nil }
+        queue.sync {
+            self.resync = self.file != nil
+            let n = Int((self.fileFormat?.sampleRate ?? 48000) * 0.010)
+            self.fadeInTotal = n; self.fadeInRemaining = n
+        }
         try await start(target: target)
     }
 
@@ -729,6 +742,8 @@ final class AppAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                     self.firstBufferTime = start.addingTimeInterval(pausedDuration)
                 }
                 self.resetPTSAfterPause = true
+                let n = Int((self.fileFormat?.sampleRate ?? 48000) * 0.010)
+                self.fadeInTotal = n; self.fadeInRemaining = n
             }
         }
     }
@@ -808,6 +823,15 @@ final class AppAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
                 framesWritten += writeSilence(frames: gap, format: ff, to: file)
             }
         }
+        if fadeInRemaining > 0, fadeInTotal > 0, let data = out.floatChannelData?[0] {
+            let frames = Int(out.frameLength)
+            let count = min(frames, fadeInRemaining)
+            let done = fadeInTotal - fadeInRemaining
+            for i in 0..<count {
+                data[i] *= Float(done + i) / Float(fadeInTotal)
+            }
+            fadeInRemaining -= count
+        }
         try? file.write(from: out)
         framesWritten += AVAudioFramePosition(out.frameLength)
         let (peak, rms) = bufferLevels(out)
@@ -837,10 +861,20 @@ final class AppAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
-// MARK: - Микрофон (вы)
+// MARK: - Микрофон (вы): прямой Core Audio HAL (AirPods/Bluetooth/наушники/без VPIO) + AVAudioEngine VPIO
 
 final class MicRecorder {
     private var engine = AVAudioEngine()
+    private var halDeviceID = AudioDeviceID(kAudioObjectUnknown)
+    private var halIOProcID: AudioDeviceIOProcID?
+    private var halFormat = AudioStreamBasicDescription()
+    private let halQueue = DispatchQueue(label: "mic-hal")
+    private var defaultInputListener: AudioObjectPropertyListenerBlock?
+    private var deviceRateListener: AudioObjectPropertyListenerBlock?
+    private var deviceAliveListener: AudioObjectPropertyListenerBlock?
+    private var restartDebounce: DispatchWorkItem?
+    private var stopping = false
+
     private var file: AVAudioFile?
     private var fileFormat: AVAudioFormat?
     private var converter: AVAudioConverter?
@@ -849,12 +883,15 @@ final class MicRecorder {
     private var framesWritten: AVAudioFramePosition = 0
     private var resync = false
     private var paused = false
+    private var fadeInRemaining = 0
+    private var fadeInTotal = 0
     private var health = TrackHealth()
     private var liveRms: Float = 0
     private var url: URL?
     private var observer: NSObjectProtocol?
     private var wantEcho = false
     private(set) var echoCancel = false
+    private(set) var backendUsed = "hal"    // "hal" | "avengine"
     var skipContinuityMic = true
     private var preferredDeviceID: AudioDeviceID?
     private(set) var activeDeviceID = AudioDeviceID(kAudioObjectUnknown)
@@ -862,21 +899,23 @@ final class MicRecorder {
     private(set) var continuityRejectedName: String?
     var onDeviceChange: (() -> Void)?
 
-    /// echoCancel — Voice Processing macOS (подавление эха и шума). Не включилось — пишем как обычно.
+    /// echoCancel — Voice Processing macOS (только без наушников/Bluetooth).
+    /// На AirPods/Bluetooth/наушниках и без VPIO используется прямой Core Audio HAL IOProc.
     func start(url: URL, echoCancel: Bool, skipContinuityMic: Bool = true) throws {
         self.url = url
         self.wantEcho = echoCancel
         self.skipContinuityMic = skipContinuityMic
-        try startEngine()
+        self.stopping = false
+        try startCapture()
+        registerGlobalInputListener()
         observer = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main) { [weak self] note in
-            guard let self, (note.object as? AVAudioEngine) === self.engine else { return }
-            self.restart()
-            self.onDeviceChange?()
+            guard let self, self.backendUsed == "avengine", (note.object as? AVAudioEngine) === self.engine else { return }
+            self.scheduleConfigRestart()
         }
     }
 
-    private func bindInputDeviceIfNeeded(on input: AVAudioInputNode) {
+    private func resolveTargetDevice() -> (id: AudioDeviceID, name: String) {
         let targetID: AudioDeviceID
         let targetName: String
         var rejected: String? = nil
@@ -894,28 +933,227 @@ final class MicRecorder {
         activeDeviceID = targetID
         activeDeviceName = targetName
         if let rejected { continuityRejectedName = rejected }
+        return (targetID, targetName)
+    }
 
-        let defID = CoreAudioTools.defaultInputDevice()
-        if targetID != kAudioObjectUnknown && targetID != defID, let au = input.audioUnit {
-            var dev = targetID
-            let st = AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
-                                          kAudioUnitScope_Global, 0, &dev,
-                                          UInt32(MemoryLayout<AudioDeviceID>.size))
-            if st != noErr {
-                fputs("Не удалось переключить вход на \(targetName) (OSStatus \(st))\n", stderr)
+    private func startCapture() throws {
+        let (targetID, _) = resolveTargetDevice()
+        let useVPIO = wantEcho && !CoreAudioTools.shouldSkipVoiceProcessing(inputID: targetID)
+        if !useVPIO {
+            do {
+                try startHAL(deviceID: targetID)
+                backendUsed = "hal"
+                echoCancel = false
+                if wantEcho {
+                    fputs("Микрофон: прямой Core Audio HAL («\(activeDeviceName)», VPIO пропущен)\n", stderr)
+                }
+                return
+            } catch {
+                fputs("Core Audio HAL не запустился (\(error.localizedDescription)) — пробую AVAudioEngine\n", stderr)
+                stopHAL()
             }
+        }
+        try startEngine(targetID: targetID, enableVPIO: useVPIO)
+        backendUsed = "avengine"
+    }
+
+    // MARK: Прямой Core Audio HAL IOProc (устойчив к AirPods 24↔48 кГц и Zoom)
+
+    private func startHAL(deviceID: AudioDeviceID) throws {
+        guard deviceID != kAudioObjectUnknown, CoreAudioTools.isDeviceAlive(deviceID) else {
+            throw RecorderError(message: "Микрофон недоступен")
+        }
+        var asbd = AudioStreamBasicDescription()
+        var sz = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var fmtAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreamFormat,
+                                                 mScope: kAudioDevicePropertyScopeInput,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        let st = AudioObjectGetPropertyData(deviceID, &fmtAddr, 0, nil, &sz, &asbd)
+        guard st == noErr, asbd.mSampleRate > 0, asbd.mChannelsPerFrame > 0 else {
+            throw RecorderError(message: "Не удалось прочитать формат микрофона (OSStatus \(st))")
+        }
+        guard (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0 else {
+            throw RecorderError(message: "Нестандартный формат микрофона (не Float32)")
+        }
+        halFormat = asbd
+        halDeviceID = deviceID
+
+        lock.lock()
+        if file == nil, let url {
+            let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: asbd.mSampleRate,
+                                     channels: 1, interleaved: false)!
+            file = try? AVAudioFile(forWriting: url, settings: wavSettings(sampleRate: mono.sampleRate, channels: 1),
+                                    commonFormat: .pcmFormatFloat32, interleaved: false)
+            fileFormat = mono
+        }
+        let ok = file != nil
+        if let ff = fileFormat {
+            let n = Int(ff.sampleRate * 0.010)
+            fadeInTotal = n; fadeInRemaining = n
+        }
+        converter = nil
+        lock.unlock()
+        guard ok else { throw RecorderError(message: "Не удалось создать файл записи микрофона") }
+
+        var proc: AudioDeviceIOProcID?
+        let ioSt = AudioDeviceCreateIOProcIDWithBlock(&proc, deviceID, halQueue) { [weak self] _, inInputData, _, _, _ in
+            self?.handleHALBuffer(inInputData)
+        }
+        guard ioSt == noErr, let validProc = proc else {
+            throw RecorderError(message: "Не удалось создать HAL IOProc (OSStatus \(ioSt))")
+        }
+        halIOProcID = validProc
+        let startSt = AudioDeviceStart(deviceID, validProc)
+        guard startSt == noErr else {
+            stopHAL()
+            throw RecorderError(message: "Не удалось запустить HAL микрофона (OSStatus \(startSt))")
+        }
+        registerDeviceListeners(deviceID)
+    }
+
+    private func handleHALBuffer(_ inData: UnsafePointer<AudioBufferList>) {
+        let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inData))
+        guard let firstBuf = list.first, firstBuf.mData != nil, firstBuf.mDataByteSize > 0 else { return }
+        let sr = halFormat.mSampleRate
+        let channels = max(1, Int(halFormat.mChannelsPerFrame))
+        let isNonInterleaved = (halFormat.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0
+        let frameCount = isNonInterleaved
+            ? Int(firstBuf.mDataByteSize) / MemoryLayout<Float>.size
+            : Int(firstBuf.mDataByteSize) / (MemoryLayout<Float>.size * channels)
+        guard frameCount > 0, sr > 0,
+              let monoFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sr, channels: 1, interleaved: false),
+              let monoBuf = AVAudioPCMBuffer(pcmFormat: monoFmt, frameCapacity: AVAudioFrameCount(frameCount)),
+              let dst = monoBuf.floatChannelData?[0] else { return }
+        monoBuf.frameLength = AVAudioFrameCount(frameCount)
+
+        if isNonInterleaved {
+            let chCount = min(channels, list.count)
+            let inv = 1.0 / Float(max(1, chCount))
+            memset(dst, 0, frameCount * MemoryLayout<Float>.size)
+            for c in 0..<chCount {
+                guard let raw = list[c].mData else { continue }
+                let src = raw.assumingMemoryBound(to: Float.self)
+                for i in 0..<frameCount { dst[i] += src[i] * inv }
+            }
+        } else {
+            let src = firstBuf.mData!.assumingMemoryBound(to: Float.self)
+            if channels == 1 {
+                memcpy(dst, src, frameCount * MemoryLayout<Float>.size)
+            } else {
+                let inv = 1.0 / Float(channels)
+                for i in 0..<frameCount {
+                    var s: Float = 0
+                    let base = i * channels
+                    for c in 0..<channels { s += src[base + c] }
+                    dst[i] = s * inv
+                }
+            }
+        }
+        write(monoBuf)
+    }
+
+    private func stopHAL() {
+        unregisterDeviceListeners()
+        if let proc = halIOProcID, halDeviceID != kAudioObjectUnknown {
+            _ = AudioDeviceStop(halDeviceID, proc)
+            _ = AudioDeviceDestroyIOProcID(halDeviceID, proc)
+        }
+        halIOProcID = nil
+        halDeviceID = AudioDeviceID(kAudioObjectUnknown)
+    }
+
+    private func registerGlobalInputListener() {
+        unregisterGlobalInputListener()
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.scheduleConfigRestart()
+        }
+        defaultInputListener = block
+        AudioObjectAddPropertyListenerBlock(CoreAudioTools.systemObject, &addr, DispatchQueue.main, block)
+    }
+
+    private func unregisterGlobalInputListener() {
+        guard let l = defaultInputListener else { return }
+        var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        AudioObjectRemovePropertyListenerBlock(CoreAudioTools.systemObject, &addr, DispatchQueue.main, l)
+        defaultInputListener = nil
+    }
+
+    private func registerDeviceListeners(_ devID: AudioDeviceID) {
+        unregisterDeviceListeners()
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            self?.scheduleConfigRestart()
+        }
+        deviceRateListener = block
+        deviceAliveListener = block
+        var rateAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
+                                                  mScope: kAudioObjectPropertyScopeGlobal,
+                                                  mElement: kAudioObjectPropertyElementMain)
+        if AudioObjectHasProperty(devID, &rateAddr) {
+            AudioObjectAddPropertyListenerBlock(devID, &rateAddr, DispatchQueue.main, block)
+        }
+        var aliveAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsAlive,
+                                                   mScope: kAudioObjectPropertyScopeGlobal,
+                                                   mElement: kAudioObjectPropertyElementMain)
+        if AudioObjectHasProperty(devID, &aliveAddr) {
+            AudioObjectAddPropertyListenerBlock(devID, &aliveAddr, DispatchQueue.main, block)
         }
     }
 
-    private func startEngine() throws {
+    private func unregisterDeviceListeners() {
+        let devID = halDeviceID
+        guard devID != kAudioObjectUnknown else { return }
+        if let l = deviceRateListener {
+            var rateAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate,
+                                                      mScope: kAudioObjectPropertyScopeGlobal,
+                                                      mElement: kAudioObjectPropertyElementMain)
+            AudioObjectRemovePropertyListenerBlock(devID, &rateAddr, DispatchQueue.main, l)
+            deviceRateListener = nil
+        }
+        if let l = deviceAliveListener {
+            var aliveAddr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsAlive,
+                                                       mScope: kAudioObjectPropertyScopeGlobal,
+                                                       mElement: kAudioObjectPropertyElementMain)
+            AudioObjectRemovePropertyListenerBlock(devID, &aliveAddr, DispatchQueue.main, l)
+            deviceAliveListener = nil
+        }
+    }
+
+    /// Дебаунс 300 мс: даём Bluetooth/AirPods стабилизировать профиль (24↔48 кГц) перед переподключением.
+    private func scheduleConfigRestart() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.stopping else { return }
+            self.restartDebounce?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, !self.stopping else { return }
+                self.restart()
+                self.onDeviceChange?()
+            }
+            self.restartDebounce = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.30, execute: work)
+        }
+    }
+
+    // MARK: AVAudioEngine (для встроенного микрофона с аппаратным Voice Processing)
+
+    private func startEngine(targetID: AudioDeviceID, enableVPIO: Bool) throws {
         let input = engine.inputNode
-        bindInputDeviceIfNeeded(on: input)
+        let defID = CoreAudioTools.defaultInputDevice()
+        if targetID != kAudioObjectUnknown && targetID != defID, let au = input.audioUnit {
+            var dev = targetID
+            _ = AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
+                                     kAudioUnitScope_Global, 0, &dev,
+                                     UInt32(MemoryLayout<AudioDeviceID>.size))
+        }
         echoCancel = false
-        if wantEcho && !CoreAudioTools.shouldSkipVoiceProcessing(inputID: activeDeviceID) {
+        if enableVPIO {
             do {
                 try input.setVoiceProcessingEnabled(true)
                 if #available(macOS 14.0, *) {
-                    // Не приглушать звук собеседников, пока работает подавление эха.
                     input.voiceProcessingOtherAudioDuckingConfiguration =
                         AVAudioVoiceProcessingOtherAudioDuckingConfiguration(enableAdvancedDucking: false, duckingLevel: .min)
                 }
@@ -923,14 +1161,11 @@ final class MicRecorder {
             } catch {
                 fputs("Подавление эха не включилось: \(error.localizedDescription)\n", stderr)
             }
-        } else if wantEcho {
-            fputs("Подавление эха macOS пропущено: наушники/Bluetooth («\(activeDeviceName)»)\n", stderr)
         }
         let fmt = input.outputFormat(forBus: 0)
         guard fmt.sampleRate > 0, fmt.channelCount > 0 else { throw RecorderError(message: "Микрофон недоступен") }
         lock.lock()
         if file == nil, let url {
-            // Файл — всегда моно: Voice Processing может отдавать несколько каналов.
             let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: fmt.sampleRate, channels: 1, interleaved: false)!
             file = try? AVAudioFile(forWriting: url, settings: wavSettings(sampleRate: mono.sampleRate, channels: 1),
                                     commonFormat: .pcmFormatFloat32, interleaved: false)
@@ -940,6 +1175,10 @@ final class MicRecorder {
             converter = AVAudioConverter(from: fmt, to: ff)
         } else {
             converter = nil
+        }
+        if let ff = fileFormat {
+            let n = Int(ff.sampleRate * 0.010)
+            fadeInTotal = n; fadeInRemaining = n
         }
         let ok = file != nil
         lock.unlock()
@@ -958,19 +1197,24 @@ final class MicRecorder {
             return
         }
         var out = buf
-        if let converter {
-            let cap = AVAudioFrameCount(Double(buf.frameLength) * ff.sampleRate / buf.format.sampleRate) + 64
-            guard let conv = AVAudioPCMBuffer(pcmFormat: ff, frameCapacity: cap) else { return }
-            var fed = false
-            var err: NSError?
-            converter.convert(to: conv, error: &err) { _, status in
-                if fed { status.pointee = .noDataNow; return nil }
-                fed = true
-                status.pointee = .haveData
-                return buf
+        if buf.format.sampleRate != ff.sampleRate || buf.format.channelCount != ff.channelCount {
+            if converter == nil || converter?.inputFormat != buf.format || converter?.outputFormat != ff {
+                converter = AVAudioConverter(from: buf.format, to: ff)
             }
-            if err != nil { return }
-            out = conv
+            if let converter {
+                let cap = AVAudioFrameCount(Double(buf.frameLength) * ff.sampleRate / buf.format.sampleRate) + 64
+                guard let conv = AVAudioPCMBuffer(pcmFormat: ff, frameCapacity: cap) else { return }
+                var fed = false
+                var err: NSError?
+                converter.convert(to: conv, error: &err) { _, status in
+                    if fed { status.pointee = .noDataNow; return nil }
+                    fed = true
+                    status.pointee = .haveData
+                    return buf
+                }
+                if err != nil { return }
+                out = conv
+            }
         }
         if firstBufferTime == nil { firstBufferTime = Date() }
         if resync, let start = firstBufferTime {
@@ -979,6 +1223,15 @@ final class MicRecorder {
             if gap > AVAudioFramePosition(ff.sampleRate * 0.1) {
                 framesWritten += writeSilence(frames: min(gap, AVAudioFramePosition(ff.sampleRate * 3600)), format: ff, to: file)
             }
+        }
+        if fadeInRemaining > 0, fadeInTotal > 0, let data = out.floatChannelData?[0] {
+            let frames = Int(out.frameLength)
+            let count = min(frames, fadeInRemaining)
+            let done = fadeInTotal - fadeInRemaining
+            for i in 0..<count {
+                data[i] *= Float(done + i) / Float(fadeInTotal)
+            }
+            fadeInRemaining -= count
         }
         try? file.write(from: out)
         framesWritten += AVAudioFramePosition(out.frameLength)
@@ -993,8 +1246,14 @@ final class MicRecorder {
         paused = isPaused
         if isPaused {
             liveRms = 0
-        } else if let start = firstBufferTime, pausedDuration > 0 {
-            firstBufferTime = start.addingTimeInterval(pausedDuration)
+        } else {
+            if let start = firstBufferTime, pausedDuration > 0 {
+                firstBufferTime = start.addingTimeInterval(pausedDuration)
+            }
+            if let ff = fileFormat {
+                let n = Int(ff.sampleRate * 0.010)
+                fadeInTotal = n; fadeInRemaining = n
+            }
         }
     }
 
@@ -1004,7 +1263,7 @@ final class MicRecorder {
         restart()
     }
 
-    /// Отключить Voice Processing и перезапустить микрофон (если VPIO отдаёт цифровые нули).
+    /// Отключить Voice Processing и перейти на прямой Core Audio HAL (если VPIO отдаёт цифровые нули).
     func disableEchoCancelAndRestart() {
         guard wantEcho || echoCancel else { return }
         wantEcho = false
@@ -1013,12 +1272,13 @@ final class MicRecorder {
 
     /// Сменился микрофон или формат (AirPods, сон Mac): тот же файл, новое устройство, пропуск — тишиной.
     func restart() {
+        stopHAL()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         engine = AVAudioEngine()
         lock.lock(); resync = firstBufferTime != nil; lock.unlock()
         do {
-            try startEngine()
+            try startCapture()
             lock.lock(); health.stopped = false; health.error = nil; lock.unlock()
         } catch {
             lock.lock(); health.stopped = true; health.error = error.localizedDescription; lock.unlock()
@@ -1038,8 +1298,13 @@ final class MicRecorder {
     }
 
     func stop() {
+        stopping = true
+        restartDebounce?.cancel()
+        restartDebounce = nil
+        unregisterGlobalInputListener()
         if let observer { NotificationCenter.default.removeObserver(observer) }
         observer = nil
+        stopHAL()
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         lock.lock(); file = nil; liveRms = 0; lock.unlock()
@@ -1048,11 +1313,12 @@ final class MicRecorder {
 
 // MARK: - Запись встречи целиком
 
-/// Обе дорожки вместе: others.wav (собеседники), mic.wav (вы) и meta.json со временем начала каждой.
+/// Обе дорожки вместе (или только микрофон в режиме micOnly): others.wav, mic.wav и meta.json.
 final class MeetingRecorder {
     let folder: URL
     let target: String
-    private let appRec: AppAudioRecorder
+    let micOnly: Bool
+    private let appRec: AppAudioRecorder?
     private let micRec = MicRecorder()
     private let muteMonitor = SpeakerMuteMonitor()
     private var checkpoint: DispatchSourceTimer?
@@ -1073,16 +1339,18 @@ final class MeetingRecorder {
         set { muteMonitor.onChange = newValue }
     }
     var echoCancelActive: Bool { micRec.echoCancel }
-    var captureMode: String { appRec.captureMode }
+    var captureMode: String { micOnly ? "mic_only" : (appRec?.captureMode ?? "none") }
+    var micBackend: String { micRec.backendUsed }
     var activeMicName: String { micRec.activeDeviceName }
     var activeMicID: AudioDeviceID { micRec.activeDeviceID }
     var continuityRejected: String? { micRec.continuityRejectedName }
-    var isSpeakerMuted: Bool { muteMonitor.isMuted }
+    var isSpeakerMuted: Bool { micOnly ? false : muteMonitor.isMuted }
 
-    init(folder: URL, target: String) {
+    init(folder: URL, target: String, micOnly: Bool = false) {
         self.folder = folder
         self.target = target
-        appRec = AppAudioRecorder(url: folder.appendingPathComponent("others.wav"))
+        self.micOnly = micOnly
+        self.appRec = micOnly ? nil : AppAudioRecorder(url: folder.appendingPathComponent("others.wav"))
     }
 
     private var lockURL: URL { folder.appendingPathComponent("recording.json") }
@@ -1095,17 +1363,27 @@ final class MeetingRecorder {
         totalPausedSeconds = 0
         pauses = []
         // Замок: пока процесс жив — запись идёт; если нет, сервер восстановит её при следующем запуске.
-        writeAtomically(["pid": Int(getpid()), "started": started.timeIntervalSince1970, "target": target], to: lockURL)
-        try micRec.start(url: folder.appendingPathComponent("mic.wav"), echoCancel: echoCancel,
+        writeAtomically(["pid": Int(getpid()), "started": started.timeIntervalSince1970,
+                         "target": micOnly ? "mic_only" : target], to: lockURL)
+        try micRec.start(url: folder.appendingPathComponent("mic.wav"),
+                         echoCancel: micOnly ? false : echoCancel,
                          skipContinuityMic: skipContinuityMic)
-        do {
-            try await appRec.start(target: target)
-        } catch {
-            micRec.stop()
-            try? FileManager.default.removeItem(at: lockURL)
-            throw error
+        if let appRec {
+            // Последовательный старт HAL: даём микрофону (особенно Bluetooth/AirPods) 250 мс на инициализацию
+            // до открытия Process Tap, чтобы не устраивать гонку реконфигурации аудиостека.
+            let deadline = Date().addingTimeInterval(0.25)
+            while micRec.firstBufferTime == nil && Date() < deadline {
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+            do {
+                try await appRec.start(target: target)
+            } catch {
+                micRec.stop()
+                try? FileManager.default.removeItem(at: lockURL)
+                throw error
+            }
+            muteMonitor.start(recordingStart: started)
         }
-        muteMonitor.start(recordingStart: started)
         writeMeta(inProgress: true)
         let t = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
         t.schedule(deadline: .now() + 30, repeating: 30)
@@ -1119,7 +1397,7 @@ final class MeetingRecorder {
         isPaused = true
         pauseStartedAt = Date()
         micRec.setPaused(true)
-        appRec.setPaused(true)
+        appRec?.setPaused(true)
         writeMeta(inProgress: true)
     }
 
@@ -1135,7 +1413,7 @@ final class MeetingRecorder {
         pauseStartedAt = nil
         isPaused = false
         micRec.setPaused(false, pausedDuration: dt)
-        appRec.setPaused(false, pausedDuration: dt)
+        appRec?.setPaused(false, pausedDuration: dt)
         writeMeta(inProgress: true)
     }
 
@@ -1146,15 +1424,20 @@ final class MeetingRecorder {
     }
 
     /// Здоровье дорожек с прошлой проверки: микрофон и собеседники.
-    func health() -> (mic: TrackHealth, others: TrackHealth) { (micRec.takeHealth(), appRec.takeHealth()) }
+    func health() -> (mic: TrackHealth, others: TrackHealth) {
+        (micRec.takeHealth(), appRec?.takeHealth() ?? TrackHealth())
+    }
 
     /// Текущий сглаженный RMS-уровень для живого индикатора (0…1).
-    func levels() -> (mic: Float, others: Float) { (micRec.currentRms(), appRec.currentRms()) }
+    func levels() -> (mic: Float, others: Float) {
+        (micRec.currentRms(), appRec?.currentRms() ?? 0)
+    }
 
+    func flushMeta() { writeMeta(inProgress: true) }
     func restartMic() { micRec.restart() }
     func switchMic(to deviceID: AudioDeviceID) { micRec.switchToDevice(deviceID) }
     func disableEchoCancelAndRestart() { micRec.disableEchoCancelAndRestart(); writeMeta(inProgress: true) }
-    func restartOthers() async throws { try await appRec.restart() }
+    func restartOthers() async throws { try await appRec?.restart() }
 
     /// Поиск другого активного микрофона (выполнять на фоновой очереди).
     func probeOtherMic() -> (id: AudioDeviceID, name: String, peak: Float)? {
@@ -1165,8 +1448,8 @@ final class MeetingRecorder {
         if isPaused { resume() }
         checkpoint?.cancel()
         checkpoint = nil
-        muteMonitor.stop()
-        await appRec.stop()
+        if !micOnly { muteMonitor.stop() }
+        await appRec?.stop()
         micRec.stop()
         writeMeta(inProgress: false)
         try? FileManager.default.removeItem(at: lockURL)
@@ -1174,19 +1457,23 @@ final class MeetingRecorder {
 
     private func writeMeta(inProgress: Bool) {
         var meta: [String: Any] = [
-            "target": target,
+            "target": micOnly ? "mic_only" : target,
             "started": started.timeIntervalSince1970,
             "echo_cancel": micRec.echoCancel,
-            "capture_mode": appRec.captureMode,
+            "capture_mode": captureMode,
+            "mic_backend": micRec.backendUsed,
         ]
+        if micOnly { meta["mic_only"] = true }
         if !micRec.activeDeviceName.isEmpty { meta["mic_device"] = micRec.activeDeviceName }
         if let rej = micRec.continuityRejectedName { meta["continuity_rejected"] = rej }
-        if let t = appRec.firstBufferTime { meta["others_start"] = t.timeIntervalSince1970 }
+        if let t = appRec?.firstBufferTime { meta["others_start"] = t.timeIntervalSince1970 }
         if let t = micRec.firstBufferTime { meta["mic_start"] = t.timeIntervalSince1970 }
         if totalPausedSeconds > 0 { meta["paused_seconds"] = round(totalPausedSeconds * 10) / 10 }
         if !pauses.isEmpty { meta["pauses"] = pauses }
-        let muted = muteMonitor.intervalsSnapshot()
-        if !muted.isEmpty { meta["speaker_muted"] = muted }
+        if !micOnly {
+            let muted = muteMonitor.intervalsSnapshot()
+            if !muted.isEmpty { meta["speaker_muted"] = muted }
+        }
         if inProgress {
             meta["in_progress"] = true
             meta["paused"] = isPaused

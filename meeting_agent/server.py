@@ -45,15 +45,15 @@ class Jobs:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def add(self, folder: Path, template: str | None = None, llm: str | None = None,
-            retranscribe: bool = False, asr: str | None = None) -> dict:
+            retranscribe: bool = False, asr: str | None = None, gemini_model: str | None = None) -> dict:
         folder = folder.resolve()
         with self.lock:
             for j in self.items:  # одну и ту же встречу дважды в очередь не ставим
                 if j["folder"] == str(folder) and j["status"] in ("queued", "running"):
                     return j
             job = {"id": uuid.uuid4().hex[:8], "folder": str(folder), "template": template,
-                   "llm": llm, "retranscribe": retranscribe, "asr": asr, "status": "queued", "stage": None,
-                   "error": None, "note": None, "added": time.time()}
+                   "llm": llm, "gemini_model": gemini_model, "retranscribe": retranscribe, "asr": asr,
+                   "status": "queued", "stage": None, "error": None, "note": None, "added": time.time()}
             self.items.append(job)
             self.items = [j for j in self.items if j["status"] != "done" or time.time() - j["added"] < 3600]
         self.wake.set()
@@ -89,6 +89,8 @@ class Jobs:
             cmd += ["--template", job["template"]]
         if job["llm"]:
             cmd += ["--llm", job["llm"]]
+        if job.get("gemini_model"):
+            cmd += ["--gemini-model", job["gemini_model"]]
         if job["retranscribe"]:
             cmd += ["--retranscribe"]
             if job.get("asr"):
@@ -342,7 +344,8 @@ def save_settings(data: dict) -> None:
     if isinstance(data.get("glossary"), list):
         put("whisper", "glossary", [str(x).strip() for x in data["glossary"] if str(x).strip()][:200])
     if isinstance(data.get("auto_platforms"), list):
-        allowed_plat = ("zoom", "teams", "telemost", "meet", "slack", "discord", "webex", "telegram", "whatsapp", "corp")
+        allowed_plat = ("zoom", "teams", "telemost", "meet", "slack", "discord", "webex", "telegram", "whatsapp",
+                        "corp", "jazz", "ktalk", "vkcalls", "dion", "trueconf")
         put("zoom", "platforms", [p for p in allowed_plat if p in data["auto_platforms"]])
     if data.get("auto_record_mode") in ("auto", "ask"):
         put("app", "auto_record_mode", data["auto_record_mode"])
@@ -592,10 +595,11 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Исходная запись удалена — пересоздать протокол нельзя")
         llm = data.get("llm") if data.get("llm") in BACKENDS else None
         asr = data.get("asr") if data.get("asr") in models.ASR_ENGINES else None
+        gmodel = _gemini_model(str(data["gemini_model"])) if data.get("gemini_model") else None
         if asr and data.get("retranscribe") and not models.engine_ready(cfg, asr):
             raise ValueError("Эта модель распознавания ещё не скачана: Настройки → Распознавание речи")
         job = self.state.jobs.add(Path(info["source"]), data.get("template"), llm,
-                                  bool(data.get("retranscribe")), asr)
+                                  bool(data.get("retranscribe")), asr, gemini_model=gmodel)
         self._json(job)
 
     def api_post_reveal(self, q):
@@ -605,6 +609,20 @@ class Handler(BaseHTTPRequestHandler):
         cfg["paths"]["notes"].mkdir(parents=True, exist_ok=True)
         osutil.reveal(target)
         self._json({"ok": True})
+
+    def api_post_diagnostics(self, q):
+        """Сохраняет обезличенный zip-архив диагностики в «Загрузки» и показывает в Finder/Проводнике."""
+        from . import diagnostics
+
+        cfg = config.load()
+        blob = diagnostics.build_zip(cfg, self.state.permissions)
+        dl = Path.home() / "Downloads"
+        dl.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        out = dl / f"meeting-agent-diagnostics-{stamp}.zip"
+        out.write_bytes(blob)
+        osutil.reveal(out)
+        self._json({"ok": True, "path": str(out), "name": out.name})
 
     def api_post_open(self, q):
         """Открыть заметку в приложении по умолчанию для .md (например, Obsidian или TextEdit)."""

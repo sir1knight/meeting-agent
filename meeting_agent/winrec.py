@@ -206,11 +206,13 @@ class SilenceKeeper(threading.Thread):
 
 
 class MeetingRecorder:
-    def __init__(self, folder: Path, source: str = "all"):
+    def __init__(self, folder: Path, source: str = "all", mic_only: bool = False):
         self.folder = folder
         self.source = source
+        self.mic_only = mic_only
         self.tracks: list[Track] = []
         self.keeper: SilenceKeeper | None = None
+        self.mic_id: str | None = None
         self.speaker_id: str | None = None
         self.paused_event = threading.Event()
         self._pause_started: float | None = None
@@ -229,6 +231,20 @@ class MeetingRecorder:
     @property
     def is_speaker_muted(self) -> bool:
         return self._speaker_muted
+
+    def _resolve_mic(self):
+        import soundcard as sc
+
+        if self.mic_id:
+            try:
+                m = sc.get_microphone(self.mic_id)
+                if m is not None:
+                    return m
+            except Exception:
+                pass
+        m = sc.default_microphone()
+        self.mic_id = m.id
+        return m
 
     def _resolve_speaker(self):
         import soundcard as sc
@@ -250,32 +266,42 @@ class MeetingRecorder:
         return sc.get_microphone(sp.id, include_loopback=True)
 
     def start(self) -> None:
-        import soundcard as sc
+        import shutil
 
-        from . import detect
+        from . import detect, osutil
 
         _com_init()  # запись начинают из потока слежения за встречами или из меню трея
         self.folder.mkdir(parents=True, exist_ok=True)
+        free_bytes = shutil.disk_usage(self.folder).free
+        if free_bytes < 500 * 1024 * 1024:
+            raise RuntimeError(f"Недостаточно места на диске (свободно {free_bytes // (1024 * 1024)} МБ, "
+                               "нужно минимум 500 МБ). Освободите место перед записью.")
         self._started_wall = time.time()
         self._started_mono = time.monotonic()
         self._last_checkpoint = self._started_mono
         from .recovery import write_lock
 
-        write_lock(self.folder, self.source)  # если приложение упадёт, сервер восстановит запись при запуске
-        self.speaker_id = detect.meeting_render_device_id(self.source)
-        try:
-            speaker = self._resolve_speaker()
-            self.speaker_id = speaker.id
-        except Exception as e:
-            raise RuntimeError(f"Нет устройства вывода звука ({e}): подключите динамики или наушники "
-                               "и выберите их в Параметрах Windows → Система → Звук") from e
-        mic = Track("mic", WavWriter(self.folder / "mic.wav", RATE), sc.default_microphone,
+        write_lock(self.folder, "mic_only" if self.mic_only else self.source)
+        self.mic_id = detect.meeting_capture_device_id("mic_only" if self.mic_only else self.source)
+        mic = Track("mic", WavWriter(self.folder / "mic.wav", RATE), self._resolve_mic,
                     pad_by_clock=False, paused_event=self.paused_event)
-        others = Track("others", WavWriter(self.folder / "others.wav", RATE), self._open_loopback,
-                       pad_by_clock=True, paused_event=self.paused_event)
-        self.keeper = SilenceKeeper(self._resolve_speaker)
-        self.keeper.start()
-        self.tracks = [mic, others]
+        if self.mic_only:
+            self.tracks = [mic]
+            speaker_name = "не используется (только микрофон)"
+        else:
+            self.speaker_id = detect.meeting_render_device_id(self.source)
+            try:
+                speaker = self._resolve_speaker()
+                self.speaker_id = speaker.id
+                speaker_name = speaker.name
+            except Exception as e:
+                raise RuntimeError(f"Нет устройства вывода звука ({e}): подключите динамики или наушники "
+                                   "и выберите их в Параметрах Windows → Система → Звук") from e
+            others = Track("others", WavWriter(self.folder / "others.wav", RATE), self._open_loopback,
+                           pad_by_clock=True, paused_event=self.paused_event)
+            self.keeper = SilenceKeeper(self._resolve_speaker)
+            self.keeper.start()
+            self.tracks = [mic, others]
         for t in self.tracks:
             t.start()
         for t in self.tracks:
@@ -283,16 +309,18 @@ class MeetingRecorder:
         if mic.error:
             self.stop()
             raise RuntimeError(f"Микрофон недоступен: {mic.error}. {mic_access_hint()}")
-        if others.error:
+        if not self.mic_only and len(self.tracks) > 1 and self.tracks[1].error:
             self.stop()
-            raise RuntimeError(f"Не удалось записывать звук компьютера: {others.error}")
-        self.poll_speaker_mute()
+            raise RuntimeError(f"Не удалось записывать звук компьютера: {self.tracks[1].error}")
+        osutil.prevent_sleep(True)
+        if not self.mic_only:
+            self.poll_speaker_mute()
         self.write_meta(in_progress=True)
         try:
-            mic_name = sc.default_microphone().name
+            mic_name = self._resolve_mic().name
         except Exception:
             mic_name = "?"
-        log.info("Запись: микрофон «%s», звук компьютера с «%s»", mic_name, speaker.name)
+        log.info("Запись: микрофон «%s», звук компьютера: %s", mic_name, speaker_name)
 
     def pause(self) -> None:
         if self.is_paused:
@@ -322,6 +350,8 @@ class MeetingRecorder:
 
     def poll_speaker_mute(self) -> bool:
         """Фиксирует переходы аппаратного Mute динамиков (для офлайн-AEC)."""
+        if self.mic_only:
+            return False
         from . import detect
 
         muted = detect.is_render_device_muted(self.speaker_id)
@@ -361,8 +391,24 @@ class MeetingRecorder:
             t.peak = 0.0
         return out
 
-    def restart_mic(self) -> None:
-        """Сменился микрофон по умолчанию — переходим на новый, не прерывая запись."""
+    def note_sleep(self, sleep_dt: float) -> None:
+        """Компьютер выходил из сна: на Windows time.monotonic() продолжает тикать во сне.
+        Сдвигаем часы дорожек на время сна, чтобы не залить WAV многоминутной тишиной."""
+        if sleep_dt < 1.0:
+            return
+        if self.is_paused:
+            return
+        audio_at = max(0.0, time.monotonic() - self._started_mono - self.total_paused - sleep_dt)
+        self.total_paused += sleep_dt
+        self.pauses.append([round(audio_at, 1), round(sleep_dt, 1)])
+        for t in self.tracks:
+            t.shift_clock(sleep_dt)
+        self.write_meta(in_progress=True)
+
+    def restart_mic(self, new_mic_id: str | None = None) -> None:
+        """Сменился микрофон (по умолчанию или eCommunications) — переходим на новый, не прерывая запись."""
+        if new_mic_id:
+            self.mic_id = new_mic_id
         for i, t in enumerate(self.tracks):
             if t.track == "mic" and not t.stop_event.is_set():
                 t.stop_event.set()
@@ -372,6 +418,8 @@ class MeetingRecorder:
 
     def restart_speaker(self, new_speaker_id: str | None = None) -> None:
         """Сменилось устройство вывода (наушники / гарнитура) — перезапускаем петлю WASAPI и SilenceKeeper."""
+        if self.mic_only:
+            return
         if new_speaker_id:
             self.speaker_id = new_speaker_id
         if self.keeper:
@@ -389,7 +437,9 @@ class MeetingRecorder:
         from . import osutil
 
         now_sec = max(0.0, time.monotonic() - self._started_mono - self.current_paused_seconds())
-        meta: dict = {"target": self.source, "started": self._started_wall}
+        meta: dict = {"target": "mic_only" if self.mic_only else self.source, "started": self._started_wall}
+        if self.mic_only:
+            meta["mic_only"] = True
         for t in self.tracks:
             if t.first_time:
                 meta[f"{t.track}_start"] = t.first_time
@@ -406,6 +456,9 @@ class MeetingRecorder:
         osutil.atomic_write_text(self.folder / "meta.json", json.dumps(meta, indent=2))
 
     def stop(self) -> None:
+        from . import osutil
+
+        osutil.prevent_sleep(False)
         if self.is_paused:
             self.resume()
         stopped = time.monotonic()

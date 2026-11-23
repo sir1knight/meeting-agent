@@ -122,6 +122,8 @@ def _transcribe_all(work: Path, mic: Path | None, others: Path | None, meta: dic
                     others_offset=meta.get("others_start", t0) - t0,
                     out=work / "mic_clean_16k.wav",
                     muted_intervals=meta.get("speaker_muted"),
+                    backend=cfg.get("recording", {}).get("aec_backend", "auto"),
+                    cfg=cfg,
                 )
             except Exception as e:  # noqa: BLE001 — улучшение, не повод ронять обработку
                 log.warning("Подавление эха после встречи не удалось: %s", e)
@@ -392,17 +394,22 @@ def _write_note(path: Path, work: Path, segments: list[dict], total: float, star
         for name in ("mic", "others"):
             track = find_track(work, name)
             if track:
-                track.unlink()
-        (work / "playback.wav").unlink(missing_ok=True)
-        (work / "playback.m4a").unlink(missing_ok=True)
+                osutil.safe_unlink(track)
+        osutil.safe_unlink(work / "playback.wav")
+        osutil.safe_unlink(work / "playback.m4a")
     elif cfg["output"].get("keep_audio") and cfg["output"].get("compress_audio", True) and path.is_dir():
         for name in ("mic", "others"):
             wav = work / f"{name}.wav"
             m4a = work / f"{name}.m4a"
             if wav.exists() and not m4a.exists():
+                wav_dur = audio.duration(wav)
                 if audio.compress_to_m4a(wav, m4a, bitrate=48000):
-                    wav.unlink(missing_ok=True)
-                    log.info("Архив аудио: %s → %s (%.1f МБ)", wav.name, m4a.name, m4a.stat().st_size / 1e6)
+                    if audio.validate_m4a(m4a, expected_duration=wav_dur):
+                        osutil.safe_unlink(wav)
+                        log.info("Архив аудио: %s → %s (%.1f МБ)", wav.name, m4a.name, m4a.stat().st_size / 1e6)
+                    else:
+                        osutil.safe_unlink(m4a)
+                        log.warning("Сжатый %s не прошёл проверку длительности — оставляю %s", m4a.name, wav.name)
 
     log.info("Заметка готова: %s", out)
     notify(cfg, "Заметка по встрече готова", title)

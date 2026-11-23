@@ -150,16 +150,35 @@ def match(speakers: dict[str, dict], cfg: dict, meeting: str) -> dict[str, dict]
     min_speech = float(v.get("min_speech_seconds", 10))
     bonus = float(v.get("participant_bonus", 0.10))
     from .participants import of
-    listed = {_norm(n) for n in of(cfg)}
+    listed = {_norm(n) for n in of(cfg) if _norm(n)}
+    listed_tokens = {frozenset(n.split()) for n in listed if n}
+
+    def in_listed(name: str) -> bool:
+        n = _norm(name)
+        if not n:
+            return False
+        if n in listed:
+            return True
+        toks = frozenset(n.split())
+        return bool(toks) and any(toks == lt for lt in listed_tokens)
+
     profiles = [p for p in load_profiles(cfg) if p.get("embeddings")]
     pairs = []
     for label, sp in speakers.items():
         if not sp.get("embedding"):
             continue
+        dur = speakers[label].get("duration", 0)
         for p in profiles:
             s = score(p, sp["embedding"], v.get("method", "max"), exclude_meeting=meeting)
+            on_list = in_listed(p.get("name", ""))
+            # Если задан список участников: посторонних не подставляем в «серой зоне» (с «?»),
+            # чтобы на встречу не попадали имена отсутствующих коллег; для них требуется уверенное совпадение.
+            if listed and not on_list:
+                if s >= hi and dur >= min_speech:
+                    pairs.append((s, s, label, p))
+                continue
             # Человек есть в списке участников — ему порог ниже на bonus.
-            b = bonus if _norm(p.get("name", "")) in listed else 0.0
+            b = bonus if on_list else 0.0
             if s + b >= lo:
                 pairs.append((s + b, s, label, p))
     pairs.sort(key=lambda x: x[0], reverse=True)

@@ -7,11 +7,14 @@ import AppKit
 import AVFoundation
 import CoreAudio
 import CoreGraphics
+import IOKit
 
 final class RecordingController {
     enum Source: String {
-        case manual, zoom, teams, telemost, meet, slack, discord, webex, telegram, whatsapp
+        case manual, mic_only, zoom, teams, telemost, meet, slack, discord, webex, telegram, whatsapp
+        case jazz, ktalk, vkcalls, dion, trueconf
         var platform: MeetingPlatform? { MeetingPlatform(rawValue: rawValue) }
+        var isManualLike: Bool { self == .manual || self == .mic_only }
     }
 
     private let backend: Backend
@@ -40,6 +43,7 @@ final class RecordingController {
     private(set) var titlesHidden = false  // окна Zoom видны без заголовков: нет разрешения «Запись экрана»
     // Запись остановили вручную, а окно встречи ещё открыто: не начинать её снова до конца этой встречи.
     private(set) var skipCurrentMeeting = false
+    private var triggerCooldownUntil = Date.distantPast
     private var promptedPlatform: MeetingPlatform?
 
     // Надёжность записи: проверка дорожек, пауза автостопа после сна/Breakout Rooms/смены устройства,
@@ -80,8 +84,18 @@ final class RecordingController {
             guard let self else { return }
             self.promptedPlatform = nil
             self.skipCurrentMeeting = true
+            self.triggerCooldownUntil = Date().addingTimeInterval(60)
             self.notifyBackend()
             self.onChange?()
+        }
+        // Перед сном (кроме режима закрытой крышки с внешним монитором): сбрасываем meta.json и держим автостоп.
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil,
+                                                          queue: .main) { [weak self] _ in
+            guard let self else { return }
+            if !Self.isClamshellWithExternalDisplay() {
+                self.holdStop(90)
+                self.recorder?.flushMeta()
+            }
         }
         // После сна: встреча могла продолжиться — минуту не останавливаем запись, дорожки перезапускаем.
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
@@ -90,8 +104,22 @@ final class RecordingController {
             self.holdStop(60)
             guard let rec = self.recorder else { return }
             rec.restartMic()
-            Task { try? await rec.restartOthers() }
+            if !rec.micOnly { Task { try? await rec.restartOthers() } }
         }
+    }
+
+    /// Закрыта ли крышка MacBook при подключённом внешнем мониторе (Clamshell mode — это не сон).
+    private static func isClamshellWithExternalDisplay() -> Bool {
+        var displays = [CGDirectDisplayID](repeating: 0, count: 8)
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(8, &displays, &count) == .success, count > 0 else { return false }
+        let hasExternal = (0..<Int(count)).contains { CGDisplayIsBuiltin(displays[$0]) == 0 }
+        guard hasExternal else { return false }
+        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPMrootDomain"))
+        guard svc != 0 else { return false }
+        defer { IOObjectRelease(svc) }
+        return (IORegistryEntryCreateCFProperty(svc, "AppleClamshellState" as CFString, kCFAllocatorDefault, 0)?
+            .takeRetainedValue() as? Bool) == true
     }
 
     private func holdStop(_ seconds: TimeInterval) {
@@ -142,6 +170,12 @@ final class RecordingController {
         isRecording ? stopByUser(reason: "остановлено вручную") : start(source: .manual)
     }
 
+    /// Очная встреча / диктофон: записывается только микрофон, системный звук не трогается.
+    func startMicOnly() {
+        guard !isRecording else { return }
+        start(source: .mic_only)
+    }
+
     func togglePause() {
         guard let rec = recorder, !busy else { return }
         if rec.isPaused {
@@ -158,8 +192,9 @@ final class RecordingController {
     /// Остановка по кнопке. Без этого автозапись через пару проверок начала бы новую запись той же встречи.
     func stopByUser(reason: String, process: Bool = true) {
         guard isRecording else { return }
-        if source != .manual || activePlatform() != nil {
+        if source?.isManualLike == false || activePlatform() != nil {
             skipCurrentMeeting = true
+            triggerCooldownUntil = Date().addingTimeInterval(60)
         }
         stop(reason: reason, process: process)
     }
@@ -178,8 +213,8 @@ final class RecordingController {
         if permTicks * Int(max(1, pollSeconds)) >= 60 { permTicks = 0; reportPermissions() }
         guard !busy else { return }
         let current = isRecording ? source : nil
-        let found = activePlatform(recording: current == .manual ? nil : current)
-        let active = isRecording && source != .manual ? found?.rawValue == source?.rawValue : found != nil
+        let found = activePlatform(recording: current?.isManualLike == true ? nil : current)
+        let active = isRecording && source?.isManualLike == false ? found?.rawValue == source?.rawValue : found != nil
         let now = Date()
         if active { lastSeen = now }
 
@@ -191,6 +226,10 @@ final class RecordingController {
                     notifyBackend()
                     onChange?()
                 }
+                return
+            }
+            if now < triggerCooldownUntil {
+                hits = 0
                 return
             }
             if promptedPlatform != nil {
@@ -211,7 +250,7 @@ final class RecordingController {
                     start(source: Source(rawValue: platform.rawValue) ?? .zoom)
                 }
             }
-        } else if source != .manual, !isPaused, now.timeIntervalSince(lastSeen) > stopGrace, now >= holdStopUntil {
+        } else if source?.isManualLike == false, !isPaused, now.timeIntervalSince(lastSeen) > stopGrace, now >= holdStopUntil {
             stop(reason: "встреча закончилась")
         }
     }
@@ -245,7 +284,8 @@ final class RecordingController {
             }
         }
         func app(_ p: MeetingPlatform, bundles: [String], owners: [String]) -> Bool {
-            guard autoPlatforms.contains(p.rawValue) else { return false }
+            let enabled = autoPlatforms.contains(p.rawValue) || (p.isCorp && autoPlatforms.contains("corp"))
+            guard enabled else { return false }
             if let users { return Platforms.uses(users, bundles) }
             // macOS 13–14.1: кто пишет микрофон, не узнать — окно программы плюс работающий микрофон.
             return Platforms.appWindow(wins, owners) && (current == Source(rawValue: p.rawValue) || Platforms.micRunningSomewhere())
@@ -257,6 +297,11 @@ final class RecordingController {
         if app(.webex, bundles: Platforms.webexBundles, owners: ["webex", "cisco"]) { return .webex }
         if app(.telegram, bundles: Platforms.telegramBundles, owners: ["telegram"]) { return .telegram }
         if app(.whatsapp, bundles: Platforms.whatsappBundles, owners: ["whatsapp"]) { return .whatsapp }
+        if app(.jazz, bundles: Platforms.jazzBundles, owners: ["salutejazz", "jazz"]) { return .jazz }
+        if app(.ktalk, bundles: Platforms.ktalkBundles, owners: ["контур.толк", "ktalk", "толк"]) { return .ktalk }
+        if app(.vkcalls, bundles: Platforms.vkCallsBundles, owners: ["vk звонки", "vk calls"]) { return .vkcalls }
+        if app(.dion, bundles: Platforms.dionBundles, owners: ["dion"]) { return .dion }
+        if app(.trueconf, bundles: Platforms.trueconfBundles, owners: ["trueconf"]) { return .trueconf }
         if autoPlatforms.contains("meet") {
             let browserMic = users.map { Platforms.uses($0, Platforms.browserBundles) } ?? Platforms.micRunningSomewhere()
             if browserMic && (current == .meet || Platforms.browserCallWindow(wins)) { return .meet }
@@ -296,13 +341,19 @@ final class RecordingController {
                            settingsPane: "Privacy_Microphone")
                 return
             }
+            if let free = CoreAudioTools.freeDiskSpaceBytes(for: self.recordingsDir), free < 500 * 1024 * 1024 {
+                self.alert("Недостаточно места на диске",
+                           "Свободно меньше 500 МБ (\(free / (1024 * 1024)) МБ). Освободите место на диске перед записью встречи.",
+                           settingsPane: nil)
+                return
+            }
             let fmt = DateFormatter()
             fmt.dateFormat = "yyyy-MM-dd_HH-mm-ss"
             let folder = self.recordingsDir.appendingPathComponent(fmt.string(from: Date()), isDirectory: true)
-            // Zoom — только его звук; остальные площадки — весь звук системы:
-            // их звук часто играют вспомогательные процессы, и по одной программе его можно не поймать.
+            let micOnly = (source == .mic_only)
+            // Zoom — только его звук; остальные площадки — весь звук системы; mic_only — только микрофон.
             let target = source == .zoom ? self.zoomBundle : "all"
-            let rec = MeetingRecorder(folder: folder, target: target)
+            let rec = MeetingRecorder(folder: folder, target: target, micOnly: micOnly)
             rec.echoCancel = self.echoCancel
             rec.skipContinuityMic = self.skipContinuityMic
             rec.onDeviceChange = { [weak controller = self] in controller?.holdStop(20) }  // сменили микрофон — это не конец встречи
@@ -336,7 +387,8 @@ final class RecordingController {
     }
 
     private func pillTitle() -> String {
-        source?.platform?.shortTitle ?? ""
+        if source == .mic_only { return "Микрофон" }
+        return source?.platform?.shortTitle ?? ""
     }
 
     // MARK: - Живой индикатор звука и проверка записи во время встречи
@@ -418,9 +470,19 @@ final class RecordingController {
                 }
             }
         }
-        if others.stopped && !rec.isSpeakerMuted {
+        if !rec.micOnly && others.stopped && !rec.isSpeakerMuted {
             problems.append("Пропал звук собеседников — восстанавливаю")
             Task { try? await rec.restartOthers() }
+        }
+        if let free = CoreAudioTools.freeDiskSpaceBytes(for: rec.folder) {
+            if free < 150 * 1024 * 1024 {
+                Self.notify("Meeting Agent: место на диске закончилось",
+                            "Запись остановлена и сохранена, чтобы не повредить файлы.")
+                stop(reason: "закончилось место на диске")
+                return
+            } else if free < 500 * 1024 * 1024 {
+                problems.append("Мало места на диске (< 500 МБ)")
+            }
         }
         let text = problems.first
         if text != warning || (text != nil && actionTitle != nil) {
@@ -545,7 +607,7 @@ final class RecordingController {
             self.zoomWindowWasVisible = false
             let length = max(0, Date().timeIntervalSince(started) - pausedTotal)
             // Случайно открытое окно Zoom на пару секунд — не встреча.
-            let tooShort = src != .manual ? length < self.minDuration : length < 3
+            let tooShort = src?.isManualLike == false ? length < self.minDuration : length < 3
             if tooShort {
                 try? FileManager.default.removeItem(at: rec.folder)
             } else if process {

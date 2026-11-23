@@ -10,6 +10,7 @@ import CoreGraphics
 
 enum MeetingPlatform: String, CaseIterable {
     case zoom, teams, telemost, meet, slack, discord, webex, telegram, whatsapp
+    case jazz, ktalk, vkcalls, dion, trueconf
 
     var title: String {
         switch self {
@@ -22,6 +23,11 @@ enum MeetingPlatform: String, CaseIterable {
         case .webex: return "Webex"
         case .telegram: return "Telegram"
         case .whatsapp: return "WhatsApp"
+        case .jazz: return "SaluteJazz"
+        case .ktalk: return "Контур.Толк"
+        case .vkcalls: return "VK Звонки"
+        case .dion: return "DION"
+        case .trueconf: return "TrueConf"
         }
     }
 
@@ -36,6 +42,18 @@ enum MeetingPlatform: String, CaseIterable {
         case .webex: return "Webex"
         case .telegram: return "Telegram"
         case .whatsapp: return "WhatsApp"
+        case .jazz: return "SaluteJazz"
+        case .ktalk: return "Контур.Толк"
+        case .vkcalls: return "VK Звонки"
+        case .dion: return "DION"
+        case .trueconf: return "TrueConf"
+        }
+    }
+
+    var isCorp: Bool {
+        switch self {
+        case .jazz, .ktalk, .vkcalls, .dion, .trueconf: return true
+        default: return false
         }
     }
 }
@@ -50,14 +68,21 @@ enum Platforms {
                                "com.webex.meetingmanager", "cisco-systems.spark"]
     static let telegramBundles = ["ru.keepcoder.telegram", "org.telegram.desktop"]
     static let whatsappBundles = ["net.whatsapp.whatsapp", "desktop.whatsapp"]
+    static let jazzBundles = ["ru.sberdevices.jazz", "com.sberdevices.jazz", "ru.salutejazz"]
+    static let ktalkBundles = ["ru.kontur.talk", "ru.kontur.ktalk"]
+    static let vkCallsBundles = ["com.vk.calls", "ru.vk.calls", "com.vk.vkcalls"]
+    static let dionBundles = ["vc.dion", "ru.dion", "com.dion"]
+    static let trueconfBundles = ["com.trueconf", "ru.trueconf"]
     static let browserBundles = ["com.google.chrome", "com.apple.webkit", "com.apple.safari",
                                  "ru.yandex.desktop.yandex-browser", "com.microsoft.edgemac", "org.mozilla.firefox",
                                  "company.thebrowser", "com.operasoftware", "com.brave.browser", "org.chromium"]
     static let browserOwners = ["chrome", "safari", "yandex", "яндекс", "edge", "firefox", "arc", "opera", "brave", "chromium"]
     // Заголовок вкладки звонка в браузере (окно показывает заголовок активной вкладки).
     static let webCallTitles = ["meet.google.com", "google meet", "meet –", "meet -", "телемост", "telemost",
-                                "microsoft teams", "teams.microsoft", "jitsi", "jazz", "контур.толк", "webex",
-                                "huddle", "slack", "discord"]
+                                "microsoft teams", "teams.microsoft", "jitsi", "jazz", "salutejazz", "sberjazz",
+                                "контур.толк", "ktalk", "talk.kontur", "vk звонки", "calls.vk", "мтс линк",
+                                "mts-link", "webinar.ru", "сферум", "sferum", "pruffme", "trueconf", "dion",
+                                "whereby", "webex", "huddle", "slack", "discord"]
 
     /// Bundle ID программ, у которых сейчас активен входной (микрофон) или выходной аудиопоток (macOS 14.2+).
     /// nil — macOS старше 14.2: узнать нельзя.

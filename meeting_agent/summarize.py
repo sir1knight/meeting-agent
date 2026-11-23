@@ -225,6 +225,8 @@ def chat_gemini(cfg: dict, user: str, system: str = SYSTEM, model: str | None = 
     def call(m: str) -> requests.Response:
         return _http("POST", f"{GEMINI}/models/{m}:generateContent", headers=headers, json=body, timeout=900)
 
+    r: requests.Response | None = None
+    last_err: Exception | None = None
     try:
         r = call(model)
         if r.status_code == 404:  # модель сменили или убрали — берём актуальную того же семейства
@@ -237,15 +239,27 @@ def chat_gemini(cfg: dict, user: str, system: str = SYSTEM, model: str | None = 
             log.warning("Gemini %s перегружен (%s), повтор через %d с…", model, r.status_code, wait)
             time.sleep(wait)
             r = call(model)
-        if r.status_code in GEMINI_BUSY:
-            for other in [m for m in GEMINI_FREE if m != model]:
-                log.warning("Gemini %s перегружен — пробую %s", model, other)
-                r2 = call(other)
-                if r2.status_code not in GEMINI_BUSY and r2.status_code != 404:
-                    r, model = r2, other
-                    break
     except requests.RequestException as e:
-        raise RuntimeError("Нет связи с Gemini API: проверьте интернет") from e
+        last_err = e
+        log.warning("Gemini %s не ответил (%s) — попробую более лёгкую модель", model, e)
+
+    if r is None or r.status_code in GEMINI_BUSY or r.status_code == 429:
+        for other in [m for m in GEMINI_FREE if m != model]:
+            log.warning("Gemini %s недоступен — пробую %s", model, other)
+            try:
+                r2 = call(other)
+            except requests.RequestException as e:
+                last_err = e
+                log.warning("Gemini %s не ответил: %s", other, e)
+                continue
+            if r2.status_code not in GEMINI_BUSY and r2.status_code not in (404, 429):
+                r, model, last_err = r2, other, None
+                break
+            if r is None:
+                r, model = r2, other
+
+    if r is None:
+        raise RuntimeError("Нет связи с Gemini API: проверьте интернет") from last_err
     if r.status_code in GEMINI_BUSY:
         raise RuntimeError(f"Gemini сейчас перегружен (ответ Google {r.status_code}) — это на стороне Google. "
                            "Попробуйте через пару минут или выберите другую модель в Настройках → Gemini и ChatGPT.")

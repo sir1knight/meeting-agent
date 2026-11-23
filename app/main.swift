@@ -45,6 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.recording.reportPermissions() }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 15) { self.recording.reportPermissions() }
             case "startRecording": if !self.recording.isRecording { self.recording.toggleManual() }
+            case "startMicOnly": if !self.recording.isRecording { self.recording.startMicOnly() }
             case "stopRecording": self.recording.stopByUser(reason: "остановлено в окне")
             case "togglePause": self.recording.togglePause()
             case "reloadSettings": self.recording.reloadSettings()
@@ -102,7 +103,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if recording.isRecording {
             let mins = Int(Date().timeIntervalSince(recording.since ?? Date()) / 60)
             let prefix = recording.isPaused ? "Пауза записи" : "Идёт запись"
-            let what = recording.source?.platform.map { "\(prefix) встречи \($0.title)" } ?? prefix
+            let what: String
+            if recording.source == .mic_only { what = "\(prefix) (только микрофон)" }
+            else { what = recording.source?.platform.map { "\(prefix) встречи \($0.title)" } ?? prefix }
             return what + " · \(mins) мин"
         }
         if processing > 0 { return "Обработка встреч: \(processing)" }
@@ -124,7 +127,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(item("Открыть Meeting Agent", #selector(openWindow), "o"))
         menu.addItem(item(recording.isRecording ? "Остановить запись" : "Записать сейчас", #selector(toggleRecording), "r"))
-        if recording.isRecording {
+        if !recording.isRecording {
+            menu.addItem(item("Записать только микрофон (очная встреча)", #selector(startMicOnly), "R"))
+        } else {
             menu.addItem(item(recording.isPaused ? "Продолжить запись" : "Пауза записи", #selector(togglePause), "p"))
         }
         menu.addItem(.separator())
@@ -150,6 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openWindow() { window.showAndFocus() }
     @objc private func toggleRecording() { recording.toggleManual() }
+    @objc private func startMicOnly() { recording.startMicOnly() }
     @objc private func togglePause() { recording.togglePause() }
     @objc private func toggleAuto() { recording.setAutoRecord(!recording.autoRecordEnabled) }
     @objc private func openSettings() { window.showAndFocus(); window.event("settings") }

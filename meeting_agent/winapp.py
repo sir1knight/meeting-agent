@@ -167,6 +167,7 @@ class Recording:
         self.hits = 0
         self.last_seen = 0.0
         self.skip_meeting = False  # запись остановили вручную, окно встречи ещё открыто
+        self.cooldown_until = 0.0  # кулдаун 60 с после ручной остановки
         self.hold_until = 0.0      # после смены микрофона/динамиков/сна не останавливаем запись
         self.mic_id: str | None = None
         self.speaker_id: str | None = None
@@ -205,7 +206,7 @@ class Recording:
 
     @property
     def auto_source(self) -> str | None:
-        return self.source if self.source and self.source != "manual" else None
+        return self.source if self.source and self.source not in ("manual", "mic_only") else None
 
     def watch(self) -> None:
         from .detect import active_platform
@@ -218,11 +219,13 @@ class Recording:
             now_wall = time.time()
             # Скачок времени > 15 с между 3-секундными итерациями — компьютер выходил из сна.
             if now_wall - prev_wall > max(15.0, self.poll * 4):
-                log.info("Компьютер вышел из сна (пропуск %.0f с) — удерживаю запись и обновляю устройства",
-                         now_wall - prev_wall)
+                sleep_dt = max(0.0, (now_wall - prev_wall) - self.poll)
+                log.info("Компьютер вышел из сна (пропуск %.0f с) — сдвигаю часы записи и обновляю устройства",
+                         sleep_dt)
                 self.hold_until = max(self.hold_until, now_wall + 60)
                 self.last_seen = max(self.last_seen, now_wall)
                 if self.recorder:
+                    self.recorder.note_sleep(sleep_dt)
                     self.recorder.restart_mic()
                     self.recorder.restart_speaker()
             prev_wall = now_wall
@@ -240,18 +243,21 @@ class Recording:
         устройство и 20 с не останавливается — пока программа звонка переключается, звук может «пропасть»."""
         from . import detect
 
-        try:
-            import soundcard as sc
+        mid = (detect.meeting_capture_device_id("mic_only" if self.recorder.mic_only else self.source)
+               if self.recorder else None)
+        if not mid:
+            try:
+                import soundcard as sc
 
-            mid = sc.default_microphone().id
-        except Exception:
-            mid = None
+                mid = sc.default_microphone().id
+            except Exception:
+                mid = None
         if mid and self.mic_id and mid != self.mic_id:
-            log.info("Сменился микрофон по умолчанию")
+            log.info("Сменился микрофон (по умолчанию / eCommunications)")
             self.hold_until = max(self.hold_until, time.time() + 20)
             self.last_seen = max(self.last_seen, time.time())
             if self.recorder:
-                self.recorder.restart_mic()
+                self.recorder.restart_mic(mid)
         if mid:
             self.mic_id = mid
 
@@ -291,6 +297,19 @@ class Recording:
             warn = "Микрофон не слышно — не выключен ли он (кнопка или Параметры → Звук) и тот ли выбран по умолчанию"
         elif h.get("others", {}).get("restarted") and not self.recorder.is_speaker_muted:
             warn = "Пропадал звук собеседников — восстановил запись"
+        try:
+            import shutil
+
+            free_b = shutil.disk_usage(self.recorder.folder).free
+            if free_b < 150 * 1024 * 1024:
+                self.toast("Meeting Agent: место на диске закончилось",
+                           "Запись остановлена и сохранена, чтобы не повредить файлы.")
+                self.stop("закончилось место на диске")
+                return
+            if free_b < 500 * 1024 * 1024 and not warn:
+                warn = "Мало места на диске (< 500 МБ)"
+        except OSError:
+            pass
         if warn != self.warning:
             self.warning = warn
             self.notify_backend()
@@ -313,6 +332,9 @@ class Recording:
                     self.notify_backend()
                     self.on_change()
                 return
+            if now < self.cooldown_until:
+                self.hits = 0
+                return
             if not self.auto_record:
                 self.hits = 0
                 return
@@ -328,6 +350,10 @@ class Recording:
             self.stop_by_user("остановлено вручную")
         else:
             self.start("manual")
+
+    def start_mic_only(self) -> None:
+        if not self.is_recording:
+            self.start("mic_only")
 
     def toggle_pause(self) -> None:
         if not self.recorder or self.busy:
@@ -346,6 +372,7 @@ class Recording:
             return
         if self.auto_source or time.time() - self.last_seen <= self.stop_grace:
             self.skip_meeting = True
+            self.cooldown_until = time.time() + 60
         self.stop(reason)
 
     def start(self, source: str) -> None:
@@ -357,7 +384,7 @@ class Recording:
             self.busy = True
         try:
             folder = self.recordings / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            rec = MeetingRecorder(folder, source=source)
+            rec = MeetingRecorder(folder, source=source, mic_only=(source == "mic_only"))
             try:
                 rec.start()
             except Exception as e:
@@ -392,7 +419,7 @@ class Recording:
             self.recorder = self.source = self.since = None
             length = max(0.0, time.time() - started - paused_total)
             # Случайно открытое окно Zoom на пару секунд — не встреча.
-            too_short = length < self.min_duration if src != "manual" else length < 3
+            too_short = length < self.min_duration if src not in ("manual", "mic_only") else length < 3
             if too_short:
                 import shutil
 
@@ -558,6 +585,8 @@ class App:
         cmd = (msg or {}).get("cmd")
         if cmd == "startRecording" and not self.recording.is_recording:
             threading.Thread(target=self.recording.start, args=("manual",), daemon=True).start()
+        elif cmd == "startMicOnly" and not self.recording.is_recording:
+            threading.Thread(target=self.recording.start_mic_only, daemon=True).start()
         elif cmd == "stopRecording":
             threading.Thread(target=self.recording.stop_by_user, args=("остановлено в окне",), daemon=True).start()
         elif cmd == "togglePause":
@@ -641,6 +670,9 @@ class App:
             ps.MenuItem("Открыть Meeting Agent", lambda *_: self.show_window(), default=True),
             ps.MenuItem(lambda _: "Остановить запись" if r.is_recording else "Записать сейчас",
                         lambda *_: threading.Thread(target=r.toggle_manual, daemon=True).start()),
+            ps.MenuItem("Записать только микрофон (очная встреча)",
+                        lambda *_: threading.Thread(target=r.start_mic_only, daemon=True).start(),
+                        visible=lambda _: not r.is_recording),
             ps.MenuItem(lambda _: "Продолжить запись" if r.is_paused else "Пауза записи",
                         lambda *_: threading.Thread(target=r.toggle_pause, daemon=True).start(),
                         visible=lambda _: r.is_recording),
@@ -770,11 +802,75 @@ def _ensure_packages() -> bool:
     return True
 
 
+_INSTANCE_MUTEX = None
+_HEARTBEAT_FILE = HOME / ".instance.json"
+_HEARTBEAT_INTERVAL = 10.0
+_HEARTBEAT_STALE = 35.0
+
+
+def _write_heartbeat() -> None:
+    try:
+        osutil.atomic_write_text(_HEARTBEAT_FILE, json.dumps({"pid": os.getpid(), "ts": time.time()}))
+    except OSError:
+        pass
+
+
+def _start_heartbeat(stop: threading.Event) -> None:
+    _write_heartbeat()
+
+    def loop() -> None:
+        while not stop.wait(_HEARTBEAT_INTERVAL):
+            _write_heartbeat()
+
+    threading.Thread(target=loop, daemon=True, name="instance-heartbeat").start()
+
+
+def _read_heartbeat() -> tuple[int, float] | None:
+    try:
+        data = json.loads(_HEARTBEAT_FILE.read_text(encoding="utf-8"))
+        pid = int(data.get("pid", 0))
+        ts = float(data.get("ts", 0))
+        return (pid, ts) if pid > 0 and ts > 0 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _already_running() -> bool:
-    """Второй запуск: показываем окно уже работающей копии и выходим."""
-    ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\MeetingAgentApp")
-    if ctypes.windll.kernel32.GetLastError() != 183:  # ERROR_ALREADY_EXISTS
+    """Второй запуск: показываем окно работающей копии; если старая копия зависла (heartbeat устарел),
+    предлагаем пользователю перезапустить её вместо молчаливого выхода."""
+    global _INSTANCE_MUTEX
+    k32 = ctypes.windll.kernel32
+    h = k32.CreateMutexW(None, False, "Local\\MeetingAgentApp")
+    if k32.GetLastError() != 183:  # ERROR_ALREADY_EXISTS
+        _INSTANCE_MUTEX = h
         return False
+    if h:
+        k32.CloseHandle(h)
+    hb = _read_heartbeat()
+    if hb:
+        pid, ts = hb
+        age = time.time() - ts
+        if age >= _HEARTBEAT_STALE and osutil.process_alive(pid):
+            # MB_YESNO (0x04) | MB_ICONWARNING (0x30); IDYES == 6
+            ans = ctypes.windll.user32.MessageBoxW(
+                None,
+                "Предыдущая копия Meeting Agent, похоже, перестала отвечать.\n"
+                "Закрыть зависший процесс и запустить приложение заново?",
+                TITLE,
+                0x34,
+            )
+            if ans == 6:
+                log.warning("Завершаю зависший экземпляр PID=%d (heartbeat устарел на %.0f с)", pid, age)
+                osutil.terminate_process(pid)
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline and osutil.process_alive(pid):
+                    time.sleep(0.15)
+                h2 = k32.CreateMutexW(None, False, "Local\\MeetingAgentApp")
+                if k32.GetLastError() != 183:
+                    _INSTANCE_MUTEX = h2
+                    return False
+                if h2:
+                    k32.CloseHandle(h2)
     hwnd = ctypes.windll.user32.FindWindowW(None, TITLE)
     if hwnd:
         ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
@@ -796,19 +892,25 @@ def main() -> None:
         pass
     if _already_running():
         return
+    hb_stop = threading.Event()
+    _start_heartbeat(hb_stop)
     try:
-        _unblock_downloaded()
-    except Exception as e:
-        log.warning("Не снял пометку «из интернета»: %s", e)
-    try:
-        if not _ensure_packages():
+        try:
+            _unblock_downloaded()
+        except Exception as e:
+            log.warning("Не снял пометку «из интернета»: %s", e)
+        try:
+            if not _ensure_packages():
+                return
+        except Exception as e:
+            log.exception("Установка пакетов не удалась")
+            _message(f"Не удалось установить компоненты: {e}\n\nЖурнал: {HOME / 'logs' / 'app.log'}")
             return
-    except Exception as e:
-        log.exception("Установка пакетов не удалась")
-        _message(f"Не удалось установить компоненты: {e}\n\nЖурнал: {HOME / 'logs' / 'app.log'}")
-        return
-    try:
-        App().run()
-    except Exception as e:
-        log.exception("Сбой приложения")
-        _message(f"Meeting Agent завершился с ошибкой:\n{e}\n\nЖурнал: {HOME / 'logs' / 'app.log'}")
+        try:
+            App().run()
+        except Exception as e:
+            log.exception("Сбой приложения")
+            _message(f"Meeting Agent завершился с ошибкой:\n{e}\n\nЖурнал: {HOME / 'logs' / 'app.log'}")
+    finally:
+        hb_stop.set()
+        osutil.safe_unlink(_HEARTBEAT_FILE)

@@ -54,6 +54,8 @@ button { cursor: pointer; }
   display: flex; flex-direction: column; min-height: 0;
 }
 .side-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 14px 10px; }
+.rec-group { display: flex; align-items: center; gap: 6px; }
+.mic-only-btn { padding: 5px 8px; border-radius: 999px; font-size: 13px; line-height: 1.1; }
 .brand { font-weight: 700; font-size: 17px; }
 .rec-btn {
   display: inline-flex; align-items: center; gap: 7px;

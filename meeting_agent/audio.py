@@ -176,3 +176,42 @@ def _compress_av_m4a(src: Path, dst: Path, bitrate: int = 48000) -> bool:
         return dst.exists() and dst.stat().st_size > 1024
     except Exception:  # noqa: BLE001
         return False
+
+
+def validate_m4a(path: Path, expected_duration: float | None = None) -> bool:
+    """Проверяет перед удалением исходного WAV, что сжатый M4A валиден и его длительность совпадает."""
+    import re
+
+    if not path.exists() or path.stat().st_size < 1024:
+        return False
+    dur: float | None = None
+    if not IS_WIN:
+        try:
+            r = subprocess.run(["/usr/bin/afinfo", str(path)], capture_output=True, text=True, timeout=15)
+            if r.returncode == 0:
+                m = re.search(r"estimated duration:\s*([0-9.]+)\s*sec", r.stdout)
+                if m:
+                    dur = float(m.group(1))
+        except OSError:
+            pass
+    if dur is None:
+        try:
+            import av
+
+            with av.open(str(path)) as box:
+                st = box.streams.audio[0]
+                if box.duration:
+                    dur = float(box.duration) / 1_000_000.0
+                elif st.duration and st.time_base:
+                    dur = float(st.duration * st.time_base)
+                # Пробное декодирование первого кадра.
+                next(box.decode(st), None)
+        except Exception:  # noqa: BLE001
+            pass
+    if dur is None or dur <= 0.1:
+        return False
+    if expected_duration is not None and expected_duration > 1.0:
+        tol = max(2.5, expected_duration * 0.05)
+        if abs(dur - expected_duration) > tol:
+            return False
+    return True
