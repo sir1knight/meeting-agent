@@ -418,11 +418,7 @@ def install_shell(recording: bool = False) -> dict:
     shutil.rmtree(stage, ignore_errors=True)
     stage.mkdir(parents=True)
     archive = stage / "Meeting-Agent-Mac.zip"
-    import requests
-
-    with requests.get(dl["url"], stream=True, timeout=120) as r:
-        if r.status_code != 200:
-            raise RuntimeError(f"Не удалось скачать приложение (ответ {r.status_code})")
+    with _get(dl["url"], name="GitLab", stream=True) as r:
         with open(archive, "wb") as f:
             for chunk in r.iter_content(1 << 20):
                 f.write(chunk)

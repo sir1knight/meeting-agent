@@ -180,6 +180,7 @@ enum CoreAudioTools {
             let isContinuity = transport == kAudioDeviceTransportTypeContinuityCaptureWired
                 || transport == kAudioDeviceTransportTypeContinuityCaptureWireless
                 || uidLower.contains("continuitycapture")
+                || (nameLower.contains("iphone") && (transport == kAudioDeviceTransportTypeUnknown || transport == 0))
             let isVirtual = transport == kAudioDeviceTransportTypeVirtual
                 || transport == kAudioDeviceTransportTypeAggregate
                 || uidLower.hasPrefix("local.meeting-agent.")
@@ -216,6 +217,30 @@ enum CoreAudioTools {
             return (best.id, best.name, defInfo?.name ?? "iPhone")
         }
         return (defID, defInfo?.name ?? "", nil)
+    }
+
+    /// В наушниках и на Bluetooth-гарнитурах (AirPods 24 кГц) Voice Processing macOS не нужен (нет эха
+    /// от динамиков) и при одновременной работе с Zoom может отдавать сплошные нули.
+    static func shouldSkipVoiceProcessing(inputID: AudioDeviceID) -> Bool {
+        let outID = defaultOutputDevice()
+        for dev in [inputID, outID] where dev != kAudioObjectUnknown {
+            let t = uint32Property(dev, selector: kAudioDevicePropertyTransportType) ?? 0
+            if t == kAudioDeviceTransportTypeBluetooth || t == kAudioDeviceTransportTypeBluetoothLE {
+                return true
+            }
+            let name = stringProperty(dev, selector: kAudioObjectPropertyName).lowercased()
+            if name.contains("airpods") || name.contains("headphone") || name.contains("headset") || name.contains("наушник") {
+                return true
+            }
+        }
+        // Проводные наушники в разъёме 3,5 мм (data source 'hdpn' = 0x6864706E).
+        if outID != kAudioObjectUnknown,
+           let src = uint32Property(outID, selector: kAudioDevicePropertyDataSource,
+                                    scope: kAudioDevicePropertyScopeOutput),
+           src == 0x6864706E {
+            return true
+        }
+        return false
     }
 
     /// Выключен ли аппаратно звук динамиков (кнопка Mute или громкость 0).
@@ -886,7 +911,7 @@ final class MicRecorder {
         let input = engine.inputNode
         bindInputDeviceIfNeeded(on: input)
         echoCancel = false
-        if wantEcho {
+        if wantEcho && !CoreAudioTools.shouldSkipVoiceProcessing(inputID: activeDeviceID) {
             do {
                 try input.setVoiceProcessingEnabled(true)
                 if #available(macOS 14.0, *) {
@@ -898,6 +923,8 @@ final class MicRecorder {
             } catch {
                 fputs("Подавление эха не включилось: \(error.localizedDescription)\n", stderr)
             }
+        } else if wantEcho {
+            fputs("Подавление эха macOS пропущено: наушники/Bluetooth («\(activeDeviceName)»)\n", stderr)
         }
         let fmt = input.outputFormat(forBus: 0)
         guard fmt.sampleRate > 0, fmt.channelCount > 0 else { throw RecorderError(message: "Микрофон недоступен") }
@@ -974,6 +1001,13 @@ final class MicRecorder {
     /// Переключить запись на конкретный микрофон без остановки встречи.
     func switchToDevice(_ deviceID: AudioDeviceID) {
         preferredDeviceID = deviceID
+        restart()
+    }
+
+    /// Отключить Voice Processing и перезапустить микрофон (если VPIO отдаёт цифровые нули).
+    func disableEchoCancelAndRestart() {
+        guard wantEcho || echoCancel else { return }
+        wantEcho = false
         restart()
     }
 
@@ -1119,6 +1153,7 @@ final class MeetingRecorder {
 
     func restartMic() { micRec.restart() }
     func switchMic(to deviceID: AudioDeviceID) { micRec.switchToDevice(deviceID) }
+    func disableEchoCancelAndRestart() { micRec.disableEchoCancelAndRestart(); writeMeta(inProgress: true) }
     func restartOthers() async throws { try await appRec.restart() }
 
     /// Поиск другого активного микрофона (выполнять на фоновой очереди).

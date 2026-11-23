@@ -374,6 +374,15 @@ final class RecordingController {
             micRestarts = 0
             if mic.peakSinceCheck == 0 {
                 micSilentFor += 15
+                // Реальный микрофон всегда имеет фоновый шум > 0; ровные нули при включённом VPIO —
+                // признак конфликта Voice Processing с устройством/Zoom: отключаем VPIO и перезапускаем.
+                if rec.echoCancelActive && micSilentFor >= 15 {
+                    NSLog("Meeting Agent: Voice Processing отдаёт нули — перезапускаю микрофон без VPIO")
+                    micSilentFor = 0
+                    rec.disableEchoCancelAndRestart()
+                    notifyBackend()
+                    return
+                }
             } else {
                 micSilentFor = 0
                 suggestedMic = nil
