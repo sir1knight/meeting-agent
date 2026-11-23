@@ -1,10 +1,14 @@
-"""Запись встречи на Windows: микрофон и звук компьютера (собеседники в Zoom) — в два WAV, как на Mac:
+"""Запись встречи на Windows: микрофон и звук компьютера (собеседники) — в два WAV, как на Mac:
 mic.wav, others.wav и meta.json со временем начала каждой дорожки.
 
-Звук собеседников берётся «петлёй» WASAPI с устройства вывода по умолчанию: это весь звук компьютера,
-не только Zoom (уведомления и видео в браузере тоже попадут в запись). Пока в системе тишина, Windows
-не присылает петле ничего, поэтому параллельно в то же устройство играет беззвучный поток, а пропуски
-дополнительно заполняются нулями по часам — чтобы время в файле совпадало с реальным и с микрофоном.
+Улучшения надёжности:
+ • динамический выбор устройства вывода (включая устройство, куда реально идёт аудиосессия встречи,
+   и eCommunications — гарнитуру связи) и переключение без разрыва при смене наушников/динамиков;
+ • приоритет MMCSS (AvSetMmThreadCharacteristicsW "Audio") для потоков захвата;
+ • защита от зависания WASAPI (15+ подряд пустых чтений → немедленный перезапуск дорожки);
+ • пауза и возобновление без рассинхрона дорожек;
+ • фиксация интервалов аппаратного Mute динамиков (для офлайн-подавления эха WebRTC AEC3);
+ • чекпоинт meta.json каждые 30 с — при сбое или перезагрузке смещения дорожек сохраняются.
 """
 
 import json
@@ -77,13 +81,45 @@ def _com_done(inited: bool) -> None:
         ctypes.windll.ole32.CoUninitialize()
 
 
+def _mmcss_enter():
+    """Поднимает приоритет потока захвата через Windows MMCSS, чтобы локальный ASR не рвал буферы WASAPI."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        avrt = ctypes.WinDLL("avrt")
+        avrt.AvSetMmThreadCharacteristicsW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+        avrt.AvSetMmThreadCharacteristicsW.restype = wintypes.HANDLE
+        idx = wintypes.DWORD(0)
+        return avrt.AvSetMmThreadCharacteristicsW("Audio", ctypes.byref(idx))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _mmcss_leave(handle) -> None:
+    if not handle:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        avrt = ctypes.WinDLL("avrt")
+        avrt.AvRevertMmThreadCharacteristics.argtypes = [wintypes.HANDLE]
+        avrt.AvRevertMmThreadCharacteristics.restype = wintypes.BOOL
+        avrt.AvRevertMmThreadCharacteristics(handle)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class Track(threading.Thread):
-    def __init__(self, name: str, writer: WavWriter, open_device, pad_by_clock: bool):
+    def __init__(self, name: str, writer: WavWriter, open_device, pad_by_clock: bool,
+                 paused_event: threading.Event | None = None):
         super().__init__(daemon=True, name=f"rec-{name}")
         self.track = name
         self.writer = writer
         self.open_device = open_device
         self.pad_by_clock = pad_by_clock
+        self.paused_event = paused_event or threading.Event()
         self.stop_event = threading.Event()
         self.first_time: float | None = None  # время начала по часам системы — для meta.json
         self.first_mono: float | None = None  # то же по монотонным часам — для расчёта пропусков
@@ -95,23 +131,37 @@ class Track(threading.Thread):
 
     def revived(self) -> "Track":
         """Новая дорожка в тот же файл (устройство пропало или сменилось): время продолжается, пропуск — тишиной."""
-        t = Track(self.track, self.writer, self.open_device, self.pad_by_clock)
+        t = Track(self.track, self.writer, self.open_device, self.pad_by_clock, self.paused_event)
         t.first_time, t.first_mono, t.resync = self.first_time, self.first_mono, self.first_mono is not None
         return t
 
+    def shift_clock(self, paused_dt: float) -> None:
+        """Сдвигает точку отсчёта на длительность паузы, чтобы пауза не превратилась в тишину."""
+        if self.first_mono is not None and paused_dt > 0:
+            self.first_mono += paused_dt
+
     def run(self) -> None:
         inited = False
+        mmcss = None
         try:
             inited = _com_init()
+            mmcss = _mmcss_enter()
+            empty_reads = 0
             with self.open_device().recorder(samplerate=RATE, blocksize=BLOCK) as rec:
                 self.ready.set()
                 while not self.stop_event.is_set():
                     data = rec.record(numframes=BLOCK)
                     now, now_mono = time.time(), time.monotonic()
                     if not len(data):
+                        empty_reads += 1
+                        if empty_reads >= 15:
+                            raise RuntimeError(f"Устройство {self.track} перестало отдавать звук (пустые буферы)")
+                        continue
+                    empty_reads = 0
+                    self.last_block = now_mono
+                    if self.paused_event.is_set():
                         continue
                     mono = data.mean(axis=1) if data.ndim > 1 else data
-                    self.last_block = now_mono
                     self.peak = max(self.peak, float(np.abs(mono).max()) if len(mono) else 0.0)
                     if self.first_time is None:
                         self.first_time = now - len(mono) / RATE
@@ -122,31 +172,31 @@ class Track(threading.Thread):
                         # Монотонные часы: подводка системных часов (NTP) не превратится в «тишину».
                         gap = int((now_mono - self.first_mono) * RATE) - len(mono) - self.writer.frames
                         if gap > RATE // 5:
-                            self.writer.silence(gap)
+                            self.writer.silence(min(gap, RATE * 3600))
                     self.writer.write(mono.astype(np.float32))
         except Exception as e:  # покажем пользователю через MeetingRecorder.error
             self.error = e
             log.exception("Запись дорожки %s оборвалась", self.track)
         finally:
             self.ready.set()
+            _mmcss_leave(mmcss)
             _com_done(inited)
 
 
 class SilenceKeeper(threading.Thread):
     """Беззвучный поток в устройство вывода: без него петля WASAPI молчит, пока никто не говорит."""
 
-    def __init__(self):
+    def __init__(self, open_speaker):
         super().__init__(daemon=True, name="rec-keepalive")
+        self.open_speaker = open_speaker
         self.stop_event = threading.Event()
 
     def run(self) -> None:
         inited = False
         try:
-            import soundcard as sc
-
             inited = _com_init()
             zeros = np.zeros((BLOCK, 1), dtype=np.float32)
-            with sc.default_speaker().player(samplerate=RATE, channels=1, blocksize=BLOCK) as p:
+            with self.open_speaker().player(samplerate=RATE, channels=1, blocksize=BLOCK) as p:
                 while not self.stop_event.is_set():
                     p.play(zeros)
         except Exception as e:
@@ -156,28 +206,74 @@ class SilenceKeeper(threading.Thread):
 
 
 class MeetingRecorder:
-    def __init__(self, folder: Path):
+    def __init__(self, folder: Path, source: str = "all"):
         self.folder = folder
+        self.source = source
         self.tracks: list[Track] = []
         self.keeper: SilenceKeeper | None = None
+        self.speaker_id: str | None = None
+        self.paused_event = threading.Event()
+        self._pause_started: float | None = None
+        self.total_paused = 0.0
+        self.pauses: list[list[float]] = []
+        self._started_wall = 0.0
+        self._started_mono = 0.0
+        self._speaker_muted = False
+        self._muted_intervals: list[list[float]] = []
+        self._last_checkpoint = 0.0
+
+    @property
+    def is_paused(self) -> bool:
+        return self.paused_event.is_set()
+
+    @property
+    def is_speaker_muted(self) -> bool:
+        return self._speaker_muted
+
+    def _resolve_speaker(self):
+        import soundcard as sc
+
+        if self.speaker_id:
+            try:
+                sp = sc.get_speaker(self.speaker_id)
+                if sp is not None:
+                    return sp
+            except Exception:
+                pass
+        return sc.default_speaker()
+
+    def _open_loopback(self):
+        import soundcard as sc
+
+        sp = self._resolve_speaker()
+        self.speaker_id = sp.id
+        return sc.get_microphone(sp.id, include_loopback=True)
 
     def start(self) -> None:
         import soundcard as sc
 
-        _com_init()  # запись начинают из потока слежения за Zoom или из меню трея (поток живёт долго)
+        from . import detect
+
+        _com_init()  # запись начинают из потока слежения за встречами или из меню трея
         self.folder.mkdir(parents=True, exist_ok=True)
+        self._started_wall = time.time()
+        self._started_mono = time.monotonic()
+        self._last_checkpoint = self._started_mono
         from .recovery import write_lock
 
-        write_lock(self.folder, "all")  # если приложение упадёт, сервер восстановит запись при запуске
+        write_lock(self.folder, self.source)  # если приложение упадёт, сервер восстановит запись при запуске
+        self.speaker_id = detect.meeting_render_device_id(self.source)
         try:
-            speaker = sc.default_speaker()
+            speaker = self._resolve_speaker()
+            self.speaker_id = speaker.id
         except Exception as e:
             raise RuntimeError(f"Нет устройства вывода звука ({e}): подключите динамики или наушники "
                                "и выберите их в Параметрах Windows → Система → Звук") from e
-        mic = Track("mic", WavWriter(self.folder / "mic.wav", RATE), sc.default_microphone, pad_by_clock=False)
-        others = Track("others", WavWriter(self.folder / "others.wav", RATE),
-                       lambda: sc.get_microphone(speaker.id, include_loopback=True), pad_by_clock=True)
-        self.keeper = SilenceKeeper()
+        mic = Track("mic", WavWriter(self.folder / "mic.wav", RATE), sc.default_microphone,
+                    pad_by_clock=False, paused_event=self.paused_event)
+        others = Track("others", WavWriter(self.folder / "others.wav", RATE), self._open_loopback,
+                       pad_by_clock=True, paused_event=self.paused_event)
+        self.keeper = SilenceKeeper(self._resolve_speaker)
         self.keeper.start()
         self.tracks = [mic, others]
         for t in self.tracks:
@@ -190,19 +286,67 @@ class MeetingRecorder:
         if others.error:
             self.stop()
             raise RuntimeError(f"Не удалось записывать звук компьютера: {others.error}")
+        self.poll_speaker_mute()
+        self.write_meta(in_progress=True)
         try:
             mic_name = sc.default_microphone().name
         except Exception:
             mic_name = "?"
         log.info("Запись: микрофон «%s», звук компьютера с «%s»", mic_name, speaker.name)
 
+    def pause(self) -> None:
+        if self.is_paused:
+            return
+        self._pause_started = time.monotonic()
+        self.paused_event.set()
+        self.write_meta(in_progress=True)
+
+    def resume(self) -> None:
+        if not self.is_paused:
+            return
+        now_m = time.monotonic()
+        dt = max(0.0, now_m - (self._pause_started or now_m))
+        audio_at = max(0.0, (self._pause_started or now_m) - self._started_mono - self.total_paused)
+        self.total_paused += dt
+        if dt >= 0.5:
+            self.pauses.append([round(audio_at, 1), round(dt, 1)])
+        self._pause_started = None
+        for t in self.tracks:
+            t.shift_clock(dt)
+        self.paused_event.clear()
+        self.write_meta(in_progress=True)
+
+    def current_paused_seconds(self) -> float:
+        extra = max(0.0, time.monotonic() - self._pause_started) if self.is_paused and self._pause_started else 0.0
+        return self.total_paused + extra
+
+    def poll_speaker_mute(self) -> bool:
+        """Фиксирует переходы аппаратного Mute динамиков (для офлайн-AEC)."""
+        from . import detect
+
+        muted = detect.is_render_device_muted(self.speaker_id)
+        now_sec = max(0.0, time.monotonic() - self._started_mono - self.current_paused_seconds())
+        if muted != self._speaker_muted:
+            self._speaker_muted = muted
+            if muted:
+                self._muted_intervals.append([round(now_sec, 2), -1.0])
+            elif self._muted_intervals and self._muted_intervals[-1][1] < 0:
+                self._muted_intervals[-1][1] = round(now_sec, 2)
+        return muted
+
     def alive(self) -> bool:
         return any(t.is_alive() for t in self.tracks)
 
     def health(self) -> dict:
-        """Состояние дорожек с прошлой проверки; упавшие дорожки перезапускаются (как «сторож» у mymeet)."""
+        """Состояние дорожек с прошлой проверки; упавшие дорожки перезапускаются."""
         out = {}
         now = time.monotonic()
+        self.poll_speaker_mute()
+        if now - self._last_checkpoint >= 30:
+            self._last_checkpoint = now
+            self.write_meta(in_progress=True)
+        if self.is_paused:
+            return {t.track: {"restarted": False, "peak": 0.0} for t in self.tracks}
         for i, t in enumerate(list(self.tracks)):
             dead = not t.is_alive() or (t.last_block is not None and now - t.last_block > 10)
             if dead and not t.stop_event.is_set():
@@ -226,7 +370,44 @@ class MeetingRecorder:
                 self.tracks[i] = new
                 new.start()
 
+    def restart_speaker(self, new_speaker_id: str | None = None) -> None:
+        """Сменилось устройство вывода (наушники / гарнитура) — перезапускаем петлю WASAPI и SilenceKeeper."""
+        if new_speaker_id:
+            self.speaker_id = new_speaker_id
+        if self.keeper:
+            self.keeper.stop_event.set()
+        self.keeper = SilenceKeeper(self._resolve_speaker)
+        self.keeper.start()
+        for i, t in enumerate(self.tracks):
+            if t.track == "others" and not t.stop_event.is_set():
+                t.stop_event.set()
+                new = t.revived()
+                self.tracks[i] = new
+                new.start()
+
+    def write_meta(self, in_progress: bool) -> None:
+        from . import osutil
+
+        now_sec = max(0.0, time.monotonic() - self._started_mono - self.current_paused_seconds())
+        meta: dict = {"target": self.source, "started": self._started_wall}
+        for t in self.tracks:
+            if t.first_time:
+                meta[f"{t.track}_start"] = t.first_time
+        if self.total_paused > 0:
+            meta["paused_seconds"] = round(self.total_paused, 1)
+        if self.pauses:
+            meta["pauses"] = self.pauses
+        if self._muted_intervals:
+            meta["speaker_muted"] = [[a, b if b >= 0 else round(now_sec, 2)] for a, b in self._muted_intervals]
+        if in_progress:
+            meta["in_progress"] = True
+            meta["paused"] = self.is_paused
+            meta["checkpoint"] = time.time()
+        osutil.atomic_write_text(self.folder / "meta.json", json.dumps(meta, indent=2))
+
     def stop(self) -> None:
+        if self.is_paused:
+            self.resume()
         stopped = time.monotonic()
         if self.keeper:
             self.keeper.stop_event.set()
@@ -239,16 +420,14 @@ class MeetingRecorder:
             if t.pad_by_clock and t.first_mono:
                 gap = int((stopped - t.first_mono) * RATE) - t.writer.frames
                 if gap > RATE // 5:
-                    t.writer.silence(gap)
+                    t.writer.silence(min(gap, RATE * 3600))
             t.writer.close()
-        meta = {"target": "all"}
-        for t in self.tracks:
-            if t.first_time:
-                meta[f"{t.track}_start"] = t.first_time
-        from . import osutil
+        now_sec = max(0.0, stopped - self._started_mono - self.total_paused)
+        if self._muted_intervals and self._muted_intervals[-1][1] < 0:
+            self._muted_intervals[-1][1] = round(now_sec, 2)
+        self.write_meta(in_progress=False)
         from .recovery import remove_lock
 
-        osutil.atomic_write_text(self.folder / "meta.json", json.dumps(meta, indent=2))
         remove_lock(self.folder)
 
 

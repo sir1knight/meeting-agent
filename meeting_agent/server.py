@@ -285,6 +285,7 @@ def get_settings(cfg: dict) -> dict:
         "my_name": cfg.get("me", {}).get("name", ""),
         "language": cfg["whisper"].get("language", "ru"),
         "keep_audio": cfg["output"].get("keep_audio", True),
+        "compress_audio": cfg["output"].get("compress_audio", True),
         "diarization_enabled": cfg["diarization"].get("enabled", True),
         "voices_enabled": cfg["voices"].get("enabled", True),
         "names_guess": cfg["names"].get("guess", True),
@@ -302,6 +303,7 @@ def get_settings(cfg: dict) -> dict:
         "zoom": {k: cfg["zoom"][k] for k in ("bundle_id", "poll_seconds", "start_after_polls",
                                             "stop_grace_seconds", "min_duration_seconds")},
         "auto_record": cfg.get("app", {}).get("auto_record", True),
+        "auto_record_mode": cfg.get("app", {}).get("auto_record_mode", "auto"),
         "auto_platforms": cfg["zoom"].get("platforms", ["zoom", "teams", "telemost", "meet"]),
         "calendar_participants": bool(cfg.get("app", {}).get("calendar_participants", False)),
         "claude_code_path": claude_cli(),
@@ -314,6 +316,7 @@ def get_settings(cfg: dict) -> dict:
         "recommended_applied": bool(cfg.get("app", {}).get("recommended_applied")),
         "recordings_dir": str(cfg["paths"]["recordings"]),
         "echo_cancel": cfg.get("recording", {}).get("echo_cancel", True),
+        "skip_continuity_mic": cfg.get("recording", {}).get("skip_continuity_mic", True),
         "recording_pill": cfg.get("recording", {}).get("pill", True),
     }
 
@@ -339,10 +342,14 @@ def save_settings(data: dict) -> None:
     if isinstance(data.get("glossary"), list):
         put("whisper", "glossary", [str(x).strip() for x in data["glossary"] if str(x).strip()][:200])
     if isinstance(data.get("auto_platforms"), list):
-        put("zoom", "platforms", [p for p in ("zoom", "teams", "telemost", "meet", "corp") if p in data["auto_platforms"]])
+        allowed_plat = ("zoom", "teams", "telemost", "meet", "slack", "discord", "webex", "telegram", "whatsapp", "corp")
+        put("zoom", "platforms", [p for p in allowed_plat if p in data["auto_platforms"]])
+    if data.get("auto_record_mode") in ("auto", "ask"):
+        put("app", "auto_record_mode", data["auto_record_mode"])
     if isinstance(data.get("window_titles"), list):
         put("zoom", "window_titles", [str(x).strip() for x in data["window_titles"] if str(x).strip()])
     for key, (section, name) in {"keep_audio": ("output", "keep_audio"),
+                                 "compress_audio": ("output", "compress_audio"),
                                  "diarization_enabled": ("diarization", "enabled"),
                                  "auto_record": ("app", "auto_record"),
                                  "calendar_participants": ("app", "calendar_participants"),
@@ -351,6 +358,7 @@ def save_settings(data: dict) -> None:
                                  "live_enabled": ("live", "enabled"),
                                  "recommended_applied": ("app", "recommended_applied"),
                                  "echo_cancel": ("recording", "echo_cancel"),
+                                 "skip_continuity_mic": ("recording", "skip_continuity_mic"),
                                  "recording_pill": ("recording", "pill")}.items():
         if isinstance(data.get(key), bool):
             put(section, name, data[key])
@@ -792,7 +800,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
         self.send_response(206 if m else 200)
-        self.send_header("Content-Type", "audio/wav")
+        ctype = "audio/mp4" if f.suffix.lower() == ".m4a" else "audio/wav"
+        self.send_header("Content-Type", ctype)
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(end - start + 1))
         if m:
@@ -1047,7 +1056,8 @@ class Handler(BaseHTTPRequestHandler):
         data = self._data()
         prev = self.state.recording
         self.state.recording = {k: data.get(k) for k in ("state", "folder", "since", "source", "error", "skip_meeting",
-                                                         "warning", "echo_cancel")}
+                                                         "warning", "echo_cancel", "paused", "paused_seconds",
+                                                         "capture_mode", "speaker_muted")}
         folder = data.get("folder")
         if data.get("state") == "recording" and folder and folder != prev.get("folder"):
             participants.take_next(Path(folder))  # список «следующей встречи» достаётся этой записи
@@ -1059,7 +1069,7 @@ class Handler(BaseHTTPRequestHandler):
     def api_post_permissions(self, q):
         """Разрешения macOS от оболочки: микрофон, запись экрана и звука, календарь."""
         d = self._data()
-        self.state.permissions = {k: d.get(k) for k in ("mic", "screen", "calendar", "titles_hidden") if k in d}
+        self.state.permissions = {k: d.get(k) for k in ("mic", "screen", "calendar", "titles_hidden", "process_tap") if k in d}
         self._json({"ok": True})
 
     # --- списки участников ---

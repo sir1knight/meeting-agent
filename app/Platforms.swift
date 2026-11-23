@@ -1,14 +1,15 @@
-// Какая встреча сейчас идёт: Zoom (по заголовку окна), Teams, Яндекс Телемост или звонок в браузере
-// (Google Meet, Телемост, Teams в браузере). Для Teams, Телемоста и браузера главный признак — программа
-// сейчас пишет звук с микрофона (Core Audio, macOS 14.2+): так запись не начнётся от просто открытого окна
-// и сама закончится, когда звонок завершится.
+// Какая встреча сейчас идёт: Zoom (по заголовку окна, а без «Записи экрана» — по микрофону),
+// Teams, Яндекс Телемост, Slack, Discord, Webex, Telegram, WhatsApp и звонки в браузере
+// (Google Meet, Телемост, Teams, Jitsi, SaluteJazz, Контур.Толк, Webex).
+// Главный признак — программа сейчас пишет звук с микрофона (Core Audio, macOS 14.2+):
+// так запись не начнётся от просто открытого окна и сама закончится, когда звонок завершится.
 
 import AppKit
 import CoreAudio
 import CoreGraphics
 
 enum MeetingPlatform: String, CaseIterable {
-    case zoom, teams, telemost, meet
+    case zoom, teams, telemost, meet, slack, discord, webex, telegram, whatsapp
 
     var title: String {
         switch self {
@@ -16,24 +17,51 @@ enum MeetingPlatform: String, CaseIterable {
         case .teams: return "Microsoft Teams"
         case .telemost: return "Яндекс Телемост"
         case .meet: return "звонка в браузере"
+        case .slack: return "Slack"
+        case .discord: return "Discord"
+        case .webex: return "Webex"
+        case .telegram: return "Telegram"
+        case .whatsapp: return "WhatsApp"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .zoom: return "Zoom"
+        case .teams: return "Teams"
+        case .telemost: return "Телемост"
+        case .meet: return "браузер"
+        case .slack: return "Slack"
+        case .discord: return "Discord"
+        case .webex: return "Webex"
+        case .telegram: return "Telegram"
+        case .whatsapp: return "WhatsApp"
         }
     }
 }
 
 enum Platforms {
+    static let zoomBundles = ["us.zoom.xos"]
     static let teamsBundles = ["com.microsoft.teams"]                 // и com.microsoft.teams2, помощники
     static let telemostBundles = ["ru.yandex.desktop.telemost"]
+    static let slackBundles = ["com.tinyspeck.slackmacgap"]
+    static let discordBundles = ["com.hnc.discord"]
+    static let webexBundles = ["com.cisco.webexmeetingsapp", "com.cisco.webex.meetings",
+                               "com.webex.meetingmanager", "cisco-systems.spark"]
+    static let telegramBundles = ["ru.keepcoder.telegram", "org.telegram.desktop"]
+    static let whatsappBundles = ["net.whatsapp.whatsapp", "desktop.whatsapp"]
     static let browserBundles = ["com.google.chrome", "com.apple.webkit", "com.apple.safari",
                                  "ru.yandex.desktop.yandex-browser", "com.microsoft.edgemac", "org.mozilla.firefox",
                                  "company.thebrowser", "com.operasoftware", "com.brave.browser", "org.chromium"]
     static let browserOwners = ["chrome", "safari", "yandex", "яндекс", "edge", "firefox", "arc", "opera", "brave", "chromium"]
     // Заголовок вкладки звонка в браузере (окно показывает заголовок активной вкладки).
     static let webCallTitles = ["meet.google.com", "google meet", "meet –", "meet -", "телемост", "telemost",
-                                "microsoft teams", "teams.microsoft", "jitsi", "jazz", "контур.толк", "webex"]
+                                "microsoft teams", "teams.microsoft", "jitsi", "jazz", "контур.толк", "webex",
+                                "huddle", "slack", "discord"]
 
-    /// Bundle ID программ, которые сейчас пишут звук с микрофона (кроме самого Meeting Agent).
+    /// Bundle ID программ, у которых сейчас активен входной (микрофон) или выходной аудиопоток (macOS 14.2+).
     /// nil — macOS старше 14.2: узнать нельзя.
-    static func micUsers() -> [String]? {
+    private static func audioUsers(selector: AudioObjectPropertySelector) -> [String]? {
         guard #available(macOS 14.2, *) else { return nil }
         let system = AudioObjectID(kAudioObjectSystemObject)
         var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyProcessObjectList,
@@ -48,7 +76,7 @@ enum Platforms {
         for id in ids {
             var running: UInt32 = 0
             var sz = UInt32(MemoryLayout<UInt32>.size)
-            var a = AudioObjectPropertyAddress(mSelector: kAudioProcessPropertyIsRunningInput,
+            var a = AudioObjectPropertyAddress(mSelector: selector,
                                                mScope: kAudioObjectPropertyScopeGlobal,
                                                mElement: kAudioObjectPropertyElementMain)
             guard AudioObjectGetPropertyData(id, &a, 0, nil, &sz, &running) == noErr, running != 0 else { continue }
@@ -66,6 +94,23 @@ enum Platforms {
             }
         }
         return out
+    }
+
+    /// Bundle ID программ, которые сейчас пишут звук с микрофона (кроме самого Meeting Agent).
+    static func micUsers() -> [String]? {
+        guard #available(macOS 14.2, *) else { return nil }
+        return audioUsers(selector: kAudioProcessPropertyIsRunningInput)
+    }
+
+    /// Bundle ID программ, которые сейчас выводят звук (помогает удержать запись при переходе в Breakout Room).
+    static func outputUsers() -> [String]? {
+        guard #available(macOS 14.2, *) else { return nil }
+        return audioUsers(selector: kAudioProcessPropertyIsRunningOutput)
+    }
+
+    /// Запущен ли Zoom (учитывается при переходе в сессионный зал / Breakout Room).
+    static func isZoomRunning(bundleId: String = "us.zoom.xos") -> Bool {
+        !NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).isEmpty
     }
 
     /// Микрофон где-то работает (запасной признак для macOS 13–14.1).

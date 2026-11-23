@@ -167,8 +167,9 @@ class Recording:
         self.hits = 0
         self.last_seen = 0.0
         self.skip_meeting = False  # запись остановили вручную, окно встречи ещё открыто
-        self.hold_until = 0.0      # после смены микрофона 20 с не останавливаем запись (как у mymeet)
+        self.hold_until = 0.0      # после смены микрофона/динамиков/сна не останавливаем запись
         self.mic_id: str | None = None
+        self.speaker_id: str | None = None
         self.silent_checks = 0
         self.warning: str | None = None
         self.health_at = 0.0
@@ -176,6 +177,10 @@ class Recording:
     @property
     def is_recording(self) -> bool:
         return self.recorder is not None
+
+    @property
+    def is_paused(self) -> bool:
+        return bool(self.recorder and self.recorder.is_paused)
 
     def reload_settings(self) -> None:
         s = self.backend.get("settings")
@@ -207,31 +212,66 @@ class Recording:
         from .winrec import _com_init
 
         _com_init()  # аудиосессии WASAPI читаются через COM в этом потоке
+        prev_wall = time.time()
         while True:
             time.sleep(self.poll)
+            now_wall = time.time()
+            # Скачок времени > 15 с между 3-секундными итерациями — компьютер выходил из сна.
+            if now_wall - prev_wall > max(15.0, self.poll * 4):
+                log.info("Компьютер вышел из сна (пропуск %.0f с) — удерживаю запись и обновляю устройства",
+                         now_wall - prev_wall)
+                self.hold_until = max(self.hold_until, now_wall + 60)
+                self.last_seen = max(self.last_seen, now_wall)
+                if self.recorder:
+                    self.recorder.restart_mic()
+                    self.recorder.restart_speaker()
+            prev_wall = now_wall
             try:
                 self._watch_devices()
+                if self.recorder:
+                    self.recorder.poll_speaker_mute()
                 self._tick(active_platform(self.window_titles, self.platforms, self.auto_source))
                 self._check_health()
             except Exception:
                 log.exception("Проверка встречи не удалась")
 
     def _watch_devices(self) -> None:
-        """Сменился микрофон по умолчанию (наушники, док-станция): запись переходит на него и 20 с не
-        останавливается — пока программа звонка переключается, микрофон может «пропасть»."""
+        """Сменился микрофон или динамики/наушники (гарнитура, док-станция): запись переходит на новое
+        устройство и 20 с не останавливается — пока программа звонка переключается, звук может «пропасть»."""
+        from . import detect
+
         try:
             import soundcard as sc
 
             mid = sc.default_microphone().id
         except Exception:
-            return
-        if self.mic_id and mid != self.mic_id:
+            mid = None
+        if mid and self.mic_id and mid != self.mic_id:
             log.info("Сменился микрофон по умолчанию")
-            self.hold_until = time.time() + 20
+            self.hold_until = max(self.hold_until, time.time() + 20)
             self.last_seen = max(self.last_seen, time.time())
             if self.recorder:
                 self.recorder.restart_mic()
-        self.mic_id = mid
+        if mid:
+            self.mic_id = mid
+
+        # Отслеживаем смену устройства вывода (включая активную аудиосессию встречи / eCommunications).
+        sid = detect.meeting_render_device_id(self.source) if self.recorder else None
+        if not sid:
+            try:
+                import soundcard as sc
+
+                sid = sc.default_speaker().id
+            except Exception:
+                sid = None
+        if sid and self.speaker_id and sid != self.speaker_id:
+            log.info("Сменилось устройство вывода звука")
+            self.hold_until = max(self.hold_until, time.time() + 20)
+            self.last_seen = max(self.last_seen, time.time())
+            if self.recorder:
+                self.recorder.restart_speaker(sid)
+        if sid:
+            self.speaker_id = sid
 
     def _check_health(self) -> None:
         """Раз в 15 с: дорожки живы (упавшие перезапускаются), микрофон не молчит нулями."""
@@ -239,6 +279,8 @@ class Recording:
             return
         self.health_at = time.time()
         h = self.recorder.health()
+        if self.is_paused:
+            return
         mic = h.get("mic", {})
         if mic.get("restarted"):
             self.silent_checks = 0
@@ -247,7 +289,7 @@ class Recording:
         warn = None
         if self.silent_checks >= 3:
             warn = "Микрофон не слышно — не выключен ли он (кнопка или Параметры → Звук) и тот ли выбран по умолчанию"
-        elif h.get("others", {}).get("restarted"):
+        elif h.get("others", {}).get("restarted") and not self.recorder.is_speaker_muted:
             warn = "Пропадал звук собеседников — восстановил запись"
         if warn != self.warning:
             self.warning = warn
@@ -278,7 +320,7 @@ class Recording:
             if self.hits >= self.start_after and found:
                 self.hits = 0
                 self.start(found)
-        elif self.auto_source and now - self.last_seen > self.stop_grace and now >= self.hold_until:
+        elif self.auto_source and not self.is_paused and now - self.last_seen > self.stop_grace and now >= self.hold_until:
             self.stop("встреча закончилась")
 
     def toggle_manual(self) -> None:
@@ -286,6 +328,17 @@ class Recording:
             self.stop_by_user("остановлено вручную")
         else:
             self.start("manual")
+
+    def toggle_pause(self) -> None:
+        if not self.recorder or self.busy:
+            return
+        if self.recorder.is_paused:
+            self.recorder.resume()
+            self.silent_checks = 0
+        else:
+            self.recorder.pause()
+        self.notify_backend()
+        self.on_change()
 
     def stop_by_user(self, reason: str) -> None:
         """Без этого автозапись через пару проверок начала бы новую запись той же встречи."""
@@ -304,7 +357,7 @@ class Recording:
             self.busy = True
         try:
             folder = self.recordings / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            rec = MeetingRecorder(folder)
+            rec = MeetingRecorder(folder, source=source)
             try:
                 rec.start()
             except Exception as e:
@@ -316,6 +369,7 @@ class Recording:
                 threading.Thread(target=_message, args=(f"Не удалось начать запись.\n\n{e}",), daemon=True).start()
                 return
             self.recorder, self.source, self.since, self.last_seen = rec, source, time.time(), time.time()
+            self.speaker_id = rec.speaker_id
             self.warning, self.silent_checks, self.health_at = None, 0, time.time()
             log.info("Запись началась (%s): %s", source, folder.name)
             self.notify_backend()
@@ -333,9 +387,10 @@ class Recording:
             self.busy = True
         try:
             started, src = self.since or time.time(), self.source
+            paused_total = rec.current_paused_seconds()
             rec.stop()
             self.recorder = self.source = self.since = None
-            length = time.time() - started
+            length = max(0.0, time.time() - started - paused_total)
             # Случайно открытое окно Zoom на пару секунд — не встреча.
             too_short = length < self.min_duration if src != "manual" else length < 3
             if too_short:
@@ -358,6 +413,9 @@ class Recording:
             body["source"] = self.source
         if self.recorder:
             body["folder"] = str(self.recorder.folder)
+            body["paused"] = self.recorder.is_paused
+            body["paused_seconds"] = self.recorder.current_paused_seconds()
+            body["speaker_muted"] = self.recorder.is_speaker_muted
         if error:
             body["error"] = error
         if self.skip_meeting and not self.is_recording:
@@ -368,9 +426,11 @@ class Recording:
 
     def status_text(self) -> str:
         if self.is_recording:
-            mins = int((time.time() - (self.since or time.time())) / 60)
+            paused_s = self.recorder.current_paused_seconds() if self.recorder else 0.0
+            mins = max(0, int((time.time() - (self.since or time.time()) - paused_s) / 60))
             what = PLATFORM_TITLES.get(self.source or "")
-            return (f"Идёт запись встречи {what}" if what else "Идёт запись") + f" · {mins} мин"
+            prefix = "Пауза записи" if self.is_paused else "Идёт запись"
+            return (f"{prefix} встречи {what}" if what else prefix) + f" · {mins} мин"
         if self.skip_meeting:
             return "Запись остановлена — эту встречу больше не записываю"
         return "Жду начала встречи" if self.auto_record else "Автозапись выключена"
@@ -382,6 +442,7 @@ class Recording:
 
 
 PLATFORM_TITLES = {"zoom": "Zoom", "teams": "Teams", "telemost": "Телемоста", "meet": "в браузере",
+                   "slack": "Slack", "discord": "Discord", "telegram": "Telegram", "whatsapp": "WhatsApp",
                    "jazz": "SaluteJazz", "trueconf": "TrueConf", "ktalk": "Контур.Толка", "vkcalls": "VK Звонков",
                    "dion": "Дион", "webex": "Webex"}
 
@@ -499,6 +560,8 @@ class App:
             threading.Thread(target=self.recording.start, args=("manual",), daemon=True).start()
         elif cmd == "stopRecording":
             threading.Thread(target=self.recording.stop_by_user, args=("остановлено в окне",), daemon=True).start()
+        elif cmd == "togglePause":
+            threading.Thread(target=self.recording.toggle_pause, daemon=True).start()
         elif cmd == "reloadSettings":
             threading.Thread(target=self.recording.reload_settings, daemon=True).start()
         elif cmd == "restartApp":
@@ -541,7 +604,8 @@ class App:
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
         if self.recording.is_recording:
-            d.ellipse((6, 6, 58, 58), fill=(229, 72, 77, 255))
+            fill = (232, 152, 32, 255) if self.recording.is_paused else (229, 72, 77, 255)
+            d.ellipse((6, 6, 58, 58), fill=fill)
         else:
             d.ellipse((2, 2, 62, 62), fill=(47, 111, 228, 255))
             for i, h in enumerate((14, 30, 22, 36, 18)):  # «волна»
@@ -577,6 +641,9 @@ class App:
             ps.MenuItem("Открыть Meeting Agent", lambda *_: self.show_window(), default=True),
             ps.MenuItem(lambda _: "Остановить запись" if r.is_recording else "Записать сейчас",
                         lambda *_: threading.Thread(target=r.toggle_manual, daemon=True).start()),
+            ps.MenuItem(lambda _: "Продолжить запись" if r.is_paused else "Пауза записи",
+                        lambda *_: threading.Thread(target=r.toggle_pause, daemon=True).start(),
+                        visible=lambda _: r.is_recording),
             ps.Menu.SEPARATOR,
             ps.MenuItem("Записывать встречи автоматически", toggle_auto, checked=lambda _: r.auto_record),
             ps.MenuItem("Запускать при входе в Windows", toggle_login, checked=lambda _: autostart_enabled()),

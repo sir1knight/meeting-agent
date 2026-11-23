@@ -3,7 +3,13 @@
 // Сборка — ./build_app.sh (Python, модели и интерфейс кладутся внутрь .app).
 
 import AppKit
+import CoreGraphics
 import ServiceManagement
+
+// Быстрая проверка TCC «на свежую» в дочернем процессе (без запуска интерфейса).
+if CommandLine.arguments.contains("--check-screen-perm") {
+    exit(CGPreflightScreenCaptureAccess() ? 0 : 1)
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let backend = Backend()
@@ -36,11 +42,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if pane.hasPrefix("Privacy_"), let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") {
                     NSWorkspace.shared.open(url)
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 20) { self.recording.reportPermissions() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { self.recording.reportPermissions() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 15) { self.recording.reportPermissions() }
             case "startRecording": if !self.recording.isRecording { self.recording.toggleManual() }
             case "stopRecording": self.recording.stopByUser(reason: "остановлено в окне")
+            case "togglePause": self.recording.togglePause()
             case "reloadSettings": self.recording.reloadSettings()
             case "calendarAccess": self.recording.requestCalendarAccess()
+            case "restartApp": self.relaunchSelf()
             default: break
             }
         }
@@ -75,14 +84,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateIcon() {
         guard let button = statusItem?.button else { return }
         let symbol: String
-        if recording.isRecording { symbol = "record.circle.fill" }
+        if recording.isRecording { symbol = recording.isPaused ? "pause.circle.fill" : "record.circle.fill" }
         else if processing > 0 { symbol = "waveform.badge.magnifyingglass" }
         else { symbol = "waveform" }
         let img = NSImage(systemSymbolName: symbol, accessibilityDescription: "Meeting Agent")
             ?? NSImage(systemSymbolName: "waveform", accessibilityDescription: "Meeting Agent")
         img?.isTemplate = !recording.isRecording
         if recording.isRecording, let img {
-            button.image = img.withSymbolConfiguration(.init(paletteColors: [.systemRed]))
+            button.image = img.withSymbolConfiguration(.init(paletteColors: [recording.isPaused ? .systemOrange : .systemRed]))
         } else {
             button.image = img
         }
@@ -92,7 +101,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func statusText() -> String {
         if recording.isRecording {
             let mins = Int(Date().timeIntervalSince(recording.since ?? Date()) / 60)
-            let what = recording.source?.platform.map { "Идёт запись встречи \($0.title)" } ?? "Идёт запись"
+            let prefix = recording.isPaused ? "Пауза записи" : "Идёт запись"
+            let what = recording.source?.platform.map { "\(prefix) встречи \($0.title)" } ?? prefix
             return what + " · \(mins) мин"
         }
         if processing > 0 { return "Обработка встреч: \(processing)" }
@@ -114,6 +124,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(item("Открыть Meeting Agent", #selector(openWindow), "o"))
         menu.addItem(item(recording.isRecording ? "Остановить запись" : "Записать сейчас", #selector(toggleRecording), "r"))
+        if recording.isRecording {
+            menu.addItem(item(recording.isPaused ? "Продолжить запись" : "Пауза записи", #selector(togglePause), "p"))
+        }
         menu.addItem(.separator())
         let auto = item("Записывать встречи автоматически", #selector(toggleAuto), "")
         auto.state = recording.autoRecordEnabled ? .on : .off
@@ -137,9 +150,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openWindow() { window.showAndFocus() }
     @objc private func toggleRecording() { recording.toggleManual() }
+    @objc private func togglePause() { recording.togglePause() }
     @objc private func toggleAuto() { recording.setAutoRecord(!recording.autoRecordEnabled) }
     @objc private func openSettings() { window.showAndFocus(); window.event("settings") }
     @objc private func quit() { NSApp.terminate(nil) }
+
+    private func relaunchSelf() {
+        let appURL = Bundle.main.bundleURL
+        let cfg = NSWorkspace.OpenConfiguration()
+        cfg.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(at: appURL, configuration: cfg) { _, _ in
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
 
     @objc private func openScreenSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {

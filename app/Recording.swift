@@ -1,14 +1,16 @@
-// Запись встреч внутри приложения: вручную (весь звук системы) или автоматически, когда начинается
-// встреча в Zoom, Teams, Яндекс Телемосте или звонок в браузере (Platforms.swift). Готовая запись уходит
-// на обработку в сервер; участники и название берутся из календаря (CalendarLookup.swift), если включено.
+// Запись встреч внутри приложения: вручную (весь звук системы) или автоматически / по подтверждению,
+// когда начинается встреча в Zoom, Teams, Яндекс Телемосте, Slack, Discord, Webex, Telegram, WhatsApp
+// или звонок в браузере (Platforms.swift). Готовая запись уходит на обработку в сервер;
+// участники и название берутся из календаря (CalendarLookup.swift), если включено.
 
 import AppKit
 import AVFoundation
+import CoreAudio
 import CoreGraphics
 
 final class RecordingController {
     enum Source: String {
-        case manual, zoom, teams, telemost, meet
+        case manual, zoom, teams, telemost, meet, slack, discord, webex, telegram, whatsapp
         var platform: MeetingPlatform? { MeetingPlatform(rawValue: rawValue) }
     }
 
@@ -20,7 +22,8 @@ final class RecordingController {
 
     // Настройки из сервера (меняются в окне приложения).
     private var autoRecord = true
-    private var autoPlatforms: Set<String> = Set(MeetingPlatform.allCases.map(\.rawValue))
+    private var autoRecordMode = "auto"   // "auto" | "ask"
+    private var autoPlatforms: Set<String> = Set(["zoom", "teams", "telemost", "meet"])
     private var calendarEnabled = false
     let calendar = CalendarLookup()
     private var windowTitles = ["Zoom Meeting", "Zoom Webinar", "Конференция Zoom", "Вебинар Zoom"]
@@ -37,26 +40,49 @@ final class RecordingController {
     private(set) var titlesHidden = false  // окна Zoom видны без заголовков: нет разрешения «Запись экрана»
     // Запись остановили вручную, а окно встречи ещё открыто: не начинать её снова до конца этой встречи.
     private(set) var skipCurrentMeeting = false
+    private var promptedPlatform: MeetingPlatform?
 
-    // Надёжность записи (как у mymeet): проверка дорожек, пауза автостопа после сна и смены устройства.
+    // Надёжность записи: проверка дорожек, пауза автостопа после сна/Breakout Rooms/смены устройства,
+    // защита от iPhone Continuity Mic и поиск активного микрофона.
     private var echoCancel = true
+    private var skipContinuityMic = true
     let pill = RecordingPill()
+    private let meetingPrompt = MeetingPromptPanel()
     private var healthTimer: Timer?
+    private var levelTimer: Timer?
     private var holdStopUntil = Date.distantPast
+    private var zoomWindowWasVisible = false
     private var micSilentFor = 0.0
     private var micRestarts = 0
+    private var probingMic = false
+    private var suggestedMic: (id: AudioDeviceID, name: String)?
     private var warning: String?
     private var warnedAbout = Set<String>()
     private var permTicks = 0
 
     var onChange: (() -> Void)?
     var isRecording: Bool { recorder != nil }
+    var isPaused: Bool { recorder?.isPaused ?? false }
     var autoRecordEnabled: Bool { autoRecord }
 
     init(backend: Backend) {
         self.backend = backend
+        pill.onTogglePause = { [weak self] in self?.togglePause() }
         pill.onStop = { [weak self] in self?.stopByUser(reason: "остановлено на плашке") }
         pill.onSkip = { [weak self] in self?.discardCurrent() }
+        pill.onWarningAction = { [weak self] in self?.applySuggestedMic() }
+        meetingPrompt.onAccept = { [weak self] in
+            guard let self, let p = self.promptedPlatform else { return }
+            self.promptedPlatform = nil
+            self.start(source: Source(rawValue: p.rawValue) ?? .zoom)
+        }
+        meetingPrompt.onDismiss = { [weak self] in
+            guard let self else { return }
+            self.promptedPlatform = nil
+            self.skipCurrentMeeting = true
+            self.notifyBackend()
+            self.onChange?()
+        }
         // После сна: встреча могла продолжиться — минуту не останавливаем запись, дорожки перезапускаем.
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil,
                                                           queue: .main) { [weak self] _ in
@@ -77,11 +103,16 @@ final class RecordingController {
         backend.get("settings") { [weak self] s in
             guard let self, let s else { then?(); return }
             self.autoRecord = s["auto_record"] as? Bool ?? true
+            self.autoRecordMode = s["auto_record_mode"] as? String ?? "auto"
             if let p = s["auto_platforms"] as? [String] { self.autoPlatforms = Set(p) }
             self.calendarEnabled = s["calendar_participants"] as? Bool ?? false
             self.echoCancel = s["echo_cancel"] as? Bool ?? true
+            self.skipContinuityMic = s["skip_continuity_mic"] as? Bool ?? true
             self.pill.enabled = s["recording_pill"] as? Bool ?? true
-            if self.pill.enabled, let since = self.since, self.isRecording { self.pill.show(since: since, title: self.pillTitle()) }
+            if self.pill.enabled, let since = self.since, let rec = self.recorder {
+                self.pill.show(since: since, title: self.pillTitle(), pausedSeconds: { [weak rec] in rec?.currentPausedSeconds() ?? 0 })
+                self.pill.setPaused(rec.isPaused)
+            }
             if let t = s["window_titles"] as? [String], !t.isEmpty { self.windowTitles = t }
             if let dir = s["recordings_dir"] as? String { self.recordingsDir = URL(fileURLWithPath: dir) }
             if let z = s["zoom"] as? [String: Any] {
@@ -101,13 +132,27 @@ final class RecordingController {
     func setAutoRecord(_ on: Bool) {
         autoRecord = on
         backend.post("settings", ["auto_record": on])
+        if !on { meetingPrompt.hide(); promptedPlatform = nil }
         onChange?()
     }
 
-    // MARK: - Ручная запись
+    // MARK: - Ручная запись и пауза
 
     func toggleManual() {
         isRecording ? stopByUser(reason: "остановлено вручную") : start(source: .manual)
+    }
+
+    func togglePause() {
+        guard let rec = recorder, !busy else { return }
+        if rec.isPaused {
+            rec.resume()
+            micSilentFor = 0
+        } else {
+            rec.pause()
+        }
+        pill.setPaused(rec.isPaused)
+        notifyBackend()
+        onChange?()
     }
 
     /// Остановка по кнопке. Без этого автозапись через пару проверок начала бы новую запись той же встречи.
@@ -119,7 +164,7 @@ final class RecordingController {
         stop(reason: reason, process: process)
     }
 
-    // MARK: - Слежение за Zoom
+    // MARK: - Слежение за встречами
 
     private func startWatching() {
         timer?.invalidate()
@@ -130,7 +175,7 @@ final class RecordingController {
 
     private func tick() {
         permTicks += 1
-        if permTicks * Int(pollSeconds) >= 60 { permTicks = 0; reportPermissions() }
+        if permTicks * Int(max(1, pollSeconds)) >= 60 { permTicks = 0; reportPermissions() }
         guard !busy else { return }
         let current = isRecording ? source : nil
         let found = activePlatform(recording: current == .manual ? nil : current)
@@ -148,23 +193,57 @@ final class RecordingController {
                 }
                 return
             }
+            if promptedPlatform != nil {
+                if !active && now.timeIntervalSince(lastSeen) > stopGrace {
+                    meetingPrompt.hide()
+                    promptedPlatform = nil
+                }
+                return
+            }
             guard autoRecord else { hits = 0; return }
             hits = active ? hits + 1 : 0
             if hits >= startAfterPolls, let platform = found {
                 hits = 0
-                start(source: Source(rawValue: platform.rawValue) ?? .zoom)
+                if autoRecordMode == "ask" {
+                    promptedPlatform = platform
+                    meetingPrompt.show(platformTitle: platform.shortTitle)
+                } else {
+                    start(source: Source(rawValue: platform.rawValue) ?? .zoom)
+                }
             }
-        } else if source != .manual, now.timeIntervalSince(lastSeen) > stopGrace, now >= holdStopUntil {
+        } else if source != .manual, !isPaused, now.timeIntervalSince(lastSeen) > stopGrace, now >= holdStopUntil {
             stop(reason: "встреча закончилась")
         }
     }
 
     /// Какая встреча идёт сейчас. recording — платформа идущей автозаписи: для неё признаки мягче
-    /// (вкладку со звонком в браузере могли переключить — пока браузер пишет микрофон, встреча идёт).
+    /// (вкладку со звонком в браузере могли переключить — пока браузер пишет микрофон, встреча идёт;
+    /// в Zoom при переходе в Breakout Room окно исчезает, но аудиопроцесс Zoom ещё жив).
     private func activePlatform(recording current: Source? = nil) -> MeetingPlatform? {
         let wins = Platforms.windows()
-        if autoPlatforms.contains("zoom"), zoomMeetingVisible(wins) { return .zoom }
         let users = Platforms.micUsers()
+        if autoPlatforms.contains("zoom") {
+            let visible = zoomMeetingVisible(wins)
+            let zoomPrefix = [zoomBundle.lowercased()]
+            if visible {
+                zoomWindowWasVisible = true
+                return .zoom
+            }
+            // Без разрешения «Запись экрана» (или во время перехода в Breakout Room): проверяем аудио Zoom.
+            if let users, Platforms.uses(users, zoomPrefix) {
+                return .zoom
+            }
+            if current == .zoom {
+                // Переход в сессионный зал (Breakout Room): окно закрылось, но Zoom ещё выводит звук или только что был активен.
+                if let outUsers = Platforms.outputUsers(), Platforms.uses(outUsers, zoomPrefix) {
+                    return .zoom
+                }
+                if zoomWindowWasVisible && Platforms.isZoomRunning(bundleId: zoomBundle) {
+                    zoomWindowWasVisible = false
+                    holdStop(max(stopGrace + 35, 65))
+                }
+            }
+        }
         func app(_ p: MeetingPlatform, bundles: [String], owners: [String]) -> Bool {
             guard autoPlatforms.contains(p.rawValue) else { return false }
             if let users { return Platforms.uses(users, bundles) }
@@ -173,6 +252,11 @@ final class RecordingController {
         }
         if app(.teams, bundles: Platforms.teamsBundles, owners: ["microsoft teams", "teams"]) { return .teams }
         if app(.telemost, bundles: Platforms.telemostBundles, owners: ["телемост", "telemost"]) { return .telemost }
+        if app(.slack, bundles: Platforms.slackBundles, owners: ["slack"]) { return .slack }
+        if app(.discord, bundles: Platforms.discordBundles, owners: ["discord"]) { return .discord }
+        if app(.webex, bundles: Platforms.webexBundles, owners: ["webex", "cisco"]) { return .webex }
+        if app(.telegram, bundles: Platforms.telegramBundles, owners: ["telegram"]) { return .telegram }
+        if app(.whatsapp, bundles: Platforms.whatsappBundles, owners: ["whatsapp"]) { return .whatsapp }
         if autoPlatforms.contains("meet") {
             let browserMic = users.map { Platforms.uses($0, Platforms.browserBundles) } ?? Platforms.micRunningSomewhere()
             if browserMic && (current == .meet || Platforms.browserCallWindow(wins)) { return .meet }
@@ -201,6 +285,8 @@ final class RecordingController {
 
     private func start(source: Source) {
         guard !isRecording, !busy else { return }
+        meetingPrompt.hide()
+        promptedPlatform = nil
         busy = true
         Task { @MainActor in
             defer { self.busy = false }
@@ -213,12 +299,16 @@ final class RecordingController {
             let fmt = DateFormatter()
             fmt.dateFormat = "yyyy-MM-dd_HH-mm-ss"
             let folder = self.recordingsDir.appendingPathComponent(fmt.string(from: Date()), isDirectory: true)
-            // Zoom — только его звук; остальные (Teams, Телемост, браузер) — весь звук системы:
-            // их звук играют вспомогательные процессы, и по одной программе его можно не поймать.
+            // Zoom — только его звук; остальные площадки — весь звук системы:
+            // их звук часто играют вспомогательные процессы, и по одной программе его можно не поймать.
             let target = source == .zoom ? self.zoomBundle : "all"
             let rec = MeetingRecorder(folder: folder, target: target)
             rec.echoCancel = self.echoCancel
-            rec.onDeviceChange = { [weak self] in self?.holdStop(20) }  // сменили микрофон — это не конец встречи
+            rec.skipContinuityMic = self.skipContinuityMic
+            rec.onDeviceChange = { [weak controller = self] in controller?.holdStop(20) }  // сменили микрофон — это не конец встречи
+            rec.onSpeakerMuteChange = { [weak controller = self] _ in
+                DispatchQueue.main.async { controller?.notifyBackend() }
+            }
             do {
                 try await rec.start()
             } catch {
@@ -230,63 +320,121 @@ final class RecordingController {
             self.source = source
             self.since = Date()
             self.lastSeen = Date()
+            self.zoomWindowWasVisible = (source == .zoom)
             self.notifyBackend()
             self.onChange?()
             self.sendCalendar(folder: folder)
-            self.pill.show(since: self.since ?? Date(), title: self.pillTitle())
+            self.pill.show(since: self.since ?? Date(), title: self.pillTitle(),
+                           pausedSeconds: { [weak rec] in rec?.currentPausedSeconds() ?? 0 })
             self.startHealthChecks()
+            self.startLevelMeter()
+            if let rej = rec.continuityRejected, !rec.activeMicName.isEmpty {
+                Self.notify("Meeting Agent: микрофон iPhone пропущен",
+                            "Запись идёт с «\(rec.activeMicName)» вместо «\(rej)».")
+            }
         }
     }
 
     private func pillTitle() -> String {
-        switch source {
-        case .zoom: return "Zoom"
-        case .teams: return "Teams"
-        case .telemost: return "Телемост"
-        case .meet: return "звонок в браузере"
-        default: return ""
+        source?.platform?.shortTitle ?? ""
+    }
+
+    // MARK: - Живой индикатор звука и проверка записи во время встречи
+
+    private func startLevelMeter() {
+        levelTimer?.invalidate()
+        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self, let rec = self.recorder else { return }
+            let (m, o) = rec.levels()
+            self.pill.updateLevels(mic: m, others: o)
         }
     }
 
-    // MARK: - Проверка записи во время встречи
-
     private func startHealthChecks() {
-        micSilentFor = 0; micRestarts = 0; warning = nil; warnedAbout = []
+        micSilentFor = 0; micRestarts = 0; probingMic = false; suggestedMic = nil
+        warning = nil; warnedAbout = []
         healthTimer?.invalidate()
         healthTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in self?.checkHealth() }
     }
 
     private func checkHealth() {
-        guard let rec = recorder, !busy else { return }
+        guard let rec = recorder, !busy, !rec.isPaused else { return }
         let (mic, others) = rec.health()
         let now = Date()
         var problems: [String] = []
+        var actionTitle: String? = nil
+
         // Микрофон перестал присылать звук (устройство пропало) — перезапускаем на текущем.
         if mic.stopped || (mic.lastBufferAt.map { now.timeIntervalSince($0) > 10 } ?? true) {
             micRestarts += 1
+            suggestedMic = nil
             rec.restartMic()
             if micRestarts >= 2 { problems.append("Микрофон не отвечает — проверьте, подключён ли он") }
         } else {
             micRestarts = 0
-            micSilentFor = mic.peakSinceCheck == 0 ? micSilentFor + 15 : 0  // ровно 0 — выключен звук или нет доступа
+            if mic.peakSinceCheck == 0 {
+                micSilentFor += 15
+            } else {
+                micSilentFor = 0
+                suggestedMic = nil
+            }
             if micSilentFor >= 45 {
-                problems.append("Микрофон не слышно — не выключен ли звук микрофона и тот ли вход выбран в macOS")
+                if let sug = suggestedMic {
+                    problems.append("Микрофон молчит — слышно «\(sug.name)»")
+                    actionTitle = "Переключить"
+                } else {
+                    problems.append("Микрофон не слышно — проверьте вход и кнопку mute")
+                    if !probingMic {
+                        probingMic = true
+                        DispatchQueue.global(qos: .utility).async { [weak self, weak rec] in
+                            let found = rec?.probeOtherMic()
+                            DispatchQueue.main.async {
+                                guard let self else { return }
+                                self.probingMic = false
+                                if let found, self.micSilentFor >= 45, self.isRecording {
+                                    self.suggestedMic = (found.id, found.name)
+                                    let msg = "Микрофон молчит — слышно «\(found.name)»"
+                                    self.warning = msg
+                                    self.pill.setWarning(msg, actionTitle: "Переключить")
+                                    self.notifyBackend()
+                                    if !self.warnedAbout.contains(msg) {
+                                        self.warnedAbout.insert(msg)
+                                        Self.notify("Meeting Agent: проверьте микрофон",
+                                                    "Текущий микрофон молчит, но есть звук на «\(found.name)». Нажмите «Переключить» на плашке.")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-        if others.stopped {
+        if others.stopped && !rec.isSpeakerMuted {
             problems.append("Пропал звук собеседников — восстанавливаю")
             Task { try? await rec.restartOthers() }
         }
         let text = problems.first
-        if text != warning {
+        if text != warning || (text != nil && actionTitle != nil) {
             warning = text
-            pill.setWarning(text)
+            pill.setWarning(text, actionTitle: actionTitle)
             notifyBackend()
             if let text, !warnedAbout.contains(text) {
                 warnedAbout.insert(text)
                 Self.notify("Meeting Agent: проверьте запись", text)
             }
         }
+    }
+
+    private func applySuggestedMic() {
+        guard let rec = recorder, let sug = suggestedMic else { return }
+        suggestedMic = nil
+        micSilentFor = 0
+        warning = nil
+        pill.setWarning(nil)
+        holdStop(20)
+        rec.switchMic(to: sug.id)
+        notifyBackend()
+        Self.notify("Meeting Agent", "Микрофон переключён на «\(sug.name)»")
     }
 
     static func notify(_ title: String, _ text: String) {
@@ -314,7 +462,7 @@ final class RecordingController {
         }
     }
 
-    // MARK: - Разрешения macOS (окно приложения подсказывает, что включить)
+    // MARK: - Разрешения macOS (свежая проверка TCC в дочернем процессе без кэша)
 
     func reportPermissions() {
         let mic: String
@@ -323,20 +471,61 @@ final class RecordingController {
         case .notDetermined: mic = "unknown"
         default: mic = "denied"
         }
-        var body: [String: Any] = ["mic": mic, "screen": CGPreflightScreenCaptureAccess() ? "granted" : "denied",
-                                   "titles_hidden": titlesHidden]
-        if calendarEnabled { body["calendar"] = calendar.authorized ? "granted" : "denied" }
-        backend.post("permissions", body)
+        let inProcessScreen = CGPreflightScreenCaptureAccess()
+        let processTapSupported: Bool
+        if #available(macOS 14.2, *) { processTapSupported = true } else { processTapSupported = false }
+
+        let send: (String) -> Void = { [weak self] screenState in
+            guard let self else { return }
+            var body: [String: Any] = [
+                "mic": mic,
+                "screen": screenState,
+                "titles_hidden": self.titlesHidden,
+                "process_tap": processTapSupported,
+            ]
+            if self.calendarEnabled { body["calendar"] = self.calendar.authorized ? "granted" : "denied" }
+            self.backend.post("permissions", body)
+        }
+
+        if inProcessScreen {
+            send("granted")
+            return
+        }
+        // Свежая проверка TCC в коротком дочернем процессе: CGPreflightScreenCaptureAccess кэшируется в процессе.
+        DispatchQueue.global(qos: .utility).async {
+            let fresh = Self.probeScreenCapturePermissionFresh()
+            DispatchQueue.main.async {
+                send(fresh ? "granted_needs_restart" : "denied")
+            }
+        }
+    }
+
+    private static func probeScreenCapturePermissionFresh() -> Bool {
+        guard let exe = Bundle.main.executablePath else { return CGPreflightScreenCaptureAccess() }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: exe)
+        p.arguments = ["--check-screen-perm"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do {
+            try p.run()
+            p.waitUntilExit()
+            return p.terminationStatus == 0
+        } catch {
+            return CGPreflightScreenCaptureAccess()
+        }
     }
 
     func stop(reason: String, process: Bool = true) {
         guard let rec = recorder, !busy else { return }
         busy = true
-        healthTimer?.invalidate()
-        healthTimer = nil
+        healthTimer?.invalidate(); healthTimer = nil
+        levelTimer?.invalidate(); levelTimer = nil
         pill.hide()
         warning = nil
+        suggestedMic = nil
         let started = since ?? Date()
+        let pausedTotal = rec.currentPausedSeconds()
         let src = source
         Task { @MainActor in
             await rec.stop()
@@ -344,7 +533,8 @@ final class RecordingController {
             self.source = nil
             self.since = nil
             self.busy = false
-            let length = Date().timeIntervalSince(started)
+            self.zoomWindowWasVisible = false
+            let length = max(0, Date().timeIntervalSince(started) - pausedTotal)
             // Случайно открытое окно Zoom на пару секунд — не встреча.
             let tooShort = src != .manual ? length < self.minDuration : length < 3
             if tooShort {
@@ -381,7 +571,13 @@ final class RecordingController {
         if let folder = recorder?.folder { body["folder"] = folder.path }
         if let error { body["error"] = error }
         if let warning, isRecording { body["warning"] = warning }
-        if let rec = recorder { body["echo_cancel"] = rec.echoCancelActive }
+        if let rec = recorder {
+            body["echo_cancel"] = rec.echoCancelActive
+            body["paused"] = rec.isPaused
+            body["paused_seconds"] = rec.currentPausedSeconds()
+            body["capture_mode"] = rec.captureMode
+            body["speaker_muted"] = rec.isSpeakerMuted
+        }
         if skipCurrentMeeting && !isRecording { body["skip_meeting"] = true }
         backend.post("recording", body)
     }
@@ -404,7 +600,7 @@ final class RecordingController {
         if lower.contains("permission") || lower.contains("разрешен") || lower.contains("denied")
             || lower.contains("declined") || lower.contains("tcc") || (error as NSError).code == -3801 {
             alert("Нет разрешения на запись звука",
-                  "Разрешите Meeting Agent «Запись экрана и системного звука» в Системных настройках → Конфиденциальность и безопасность, затем перезапустите приложение. Без этого разрешения не слышно собеседников.",
+                  "Разрешите Meeting Agent запись системного звука в Системных настройках → Конфиденциальность и безопасность → Запись экрана и системного звука, затем перезапустите приложение.",
                   settingsPane: "Privacy_ScreenCapture")
         } else {
             alert("Не удалось начать запись", text, settingsPane: nil)

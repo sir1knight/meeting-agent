@@ -55,7 +55,8 @@ DEFAULTS = {
     },
     "names": {"guess": True},
     "live": {"enabled": True},
-    "recording": {"echo_cancel": True, "pill": True},
+    "recording": {"echo_cancel": True, "pill": True, "skip_continuity_mic": True},
+    "app": {"auto_record": True, "auto_record_mode": "auto"},
     "ask": {"backend": "", "gemini_model": "gemini-3.8-flash"},
     "llm": {
         "backend": "local",
@@ -67,7 +68,7 @@ DEFAULTS = {
     "claude": {"code_model": "", "model": "claude-opus-5-5", "effort": "medium", "api_key": ""},
     "gemini": {"model": "gemini-3.8-flash"},
     "openai": {"model": "gpt-5", "api_key": ""},
-    "output": {"template": "meeting", "keep_audio": True, "notify": True},
+    "output": {"template": "meeting", "keep_audio": True, "compress_audio": True, "notify": True},
 }
 
 

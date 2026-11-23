@@ -132,8 +132,10 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
   <string>Meeting Agent берёт из календаря название идущей встречи и список участников, чтобы точнее подписать собеседников. Календарь не меняется и никуда не отправляется.</string>
   <key>NSCalendarsUsageDescription</key>
   <string>Meeting Agent берёт из календаря название идущей встречи и список участников, чтобы точнее подписать собеседников. Календарь не меняется и никуда не отправляется.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Meeting Agent записывает звук собеседников на встречах без доступа к изображению экрана. Запись остаётся на этом Mac.</string>
   <key>NSScreenCaptureUsageDescription</key>
-  <string>Meeting Agent записывает звук собеседников из Zoom и замечает начало встречи. Изображение экрана не сохраняется.</string>
+  <string>Meeting Agent использует доступ к экрану для определения заголовка окна Zoom и (на macOS 13–14.1) захвата системного звука. Изображение экрана не сохраняется.</string>
   <key>NSAppTransportSecurity</key>
   <dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict>

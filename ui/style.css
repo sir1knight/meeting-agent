@@ -70,7 +70,10 @@ button { cursor: pointer; }
   background: color-mix(in srgb, var(--rec) 14%, transparent);
   display: flex; align-items: center; gap: 8px; font-weight: 600;
 }
+.rec-banner.paused { background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.rec-banner.paused .pulse { background: var(--warn); animation: none; }
 .rec-banner .link { margin-left: auto; }
+.rec-banner .link + .link { margin-left: 4px; }
 .pulse { width: 9px; height: 9px; border-radius: 50%; background: var(--rec); animation: pulse 1.4s infinite; }
 @keyframes pulse { 50% { opacity: .25; } }
 

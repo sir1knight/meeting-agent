@@ -20,6 +20,10 @@ BROWSERS = ("chrome.exe", "msedge.exe", "browser.exe", "firefox.exe", "opera.exe
 CALL_APPS = {
     "teams": ("ms-teams.exe", "teams.exe", "msteams"),
     "telemost": ("telemost.exe", "yandextelemost.exe", "telemost"),
+    "slack": ("slack.exe",),
+    "discord": ("discord.exe",),
+    "telegram": ("telegram.exe",),
+    "whatsapp": ("whatsapp.exe",),
     "jazz": ("jazz.exe", "sberjazz.exe", "salutejazz"),
     "trueconf": ("trueconf.exe",),
     "ktalk": ("ktalk.exe",),
@@ -28,8 +32,9 @@ CALL_APPS = {
     "webex": ("webex.exe", "ciscocollabhost.exe", "atmgr.exe"),
 }
 CORP = ("jazz", "trueconf", "ktalk", "vkcalls", "dion", "webex")
+MESSENGERS = ("slack", "discord", "telegram", "whatsapp")
 WEB_CALL_TITLES = ("meet.google.com", "google meet", "meet –", "meet -", "телемост", "telemost", "microsoft teams",
-                   "teams.microsoft", "jitsi", "jazz", "контур.толк", "webex")
+                   "teams.microsoft", "jitsi", "jazz", "контур.толк", "webex", "huddle", "slack", "discord")
 
 
 def mic_users_win() -> list[str]:
@@ -48,6 +53,7 @@ _CLSID_ENUM = "{BCDE0395-E52F-467C-8E3D-C4579291692E}"
 _IID_ENUM = "{A95664D2-9614-4F35-A746-DE8DB63617E6}"
 _IID_ASM2 = "{77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F}"
 _IID_ASC2 = "{BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D}"
+_IID_EPVOL = "{5CDF2C82-841E-4546-9722-0CF74078229A}"
 
 
 def _guid(text: str):
@@ -79,28 +85,45 @@ def _release(obj) -> None:
         _call(obj, 2)
 
 
-def mic_sessions_win() -> list[str]:
-    """exe программ с активной сессией записи на любом микрофоне (как детектор mymeet).
-    Своя запись не считается. Поток должен быть с инициализированным COM (CoInitializeEx)."""
+def _device_id(dev) -> str:
+    """IMMDevice::GetId (vtable[5]) с освобождением памяти через CoTaskMemFree."""
+    import ctypes
+
+    ptr = ctypes.c_void_p()
+    _call(dev, 5, ctypes.byref(ptr))
+    if not ptr.value:
+        return ""
+    try:
+        return ctypes.wstring_at(ptr.value)
+    finally:
+        ole32 = ctypes.oledll.ole32
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        ole32.CoTaskMemFree(ptr)
+
+
+def _sessions_by_flow(data_flow: int) -> list[tuple[str, str]]:
+    """[(device_id, exe_lower), ...] для всех активных аудиосессий WASAPI.
+    data_flow: 0 = eRender (динамики/наушники), 1 = eCapture (микрофоны). Свой процесс не считается."""
     import ctypes
     import os
 
     from .osutil import process_image
 
-    CLSCTX_ALL, E_CAPTURE, ACTIVE = 23, 1, 1
+    CLSCTX_ALL, ACTIVE = 23, 1
     enum = ctypes.c_void_p()
     ctypes.oledll.ole32.CoCreateInstance(ctypes.byref(_guid(_CLSID_ENUM)), None, CLSCTX_ALL,
                                          ctypes.byref(_guid(_IID_ENUM)), ctypes.byref(enum))
-    pids: set[int] = set()
+    pairs: list[tuple[str, int]] = []
     coll = ctypes.c_void_p()
     try:
-        _call(enum, 3, ctypes.c_uint(E_CAPTURE), ctypes.c_uint(ACTIVE), ctypes.byref(coll))
+        _call(enum, 3, ctypes.c_uint(data_flow), ctypes.c_uint(ACTIVE), ctypes.byref(coll))
         n = ctypes.c_uint()
         _call(coll, 3, ctypes.byref(n))
         for i in range(n.value):
             dev, mgr, sess_enum = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
             try:
                 _call(coll, 4, ctypes.c_uint(i), ctypes.byref(dev))
+                dev_id = _device_id(dev)
                 _call(dev, 3, ctypes.byref(_guid(_IID_ASM2)), ctypes.c_uint(CLSCTX_ALL), ctypes.c_void_p(), ctypes.byref(mgr))
                 _call(mgr, 5, ctypes.byref(sess_enum))
                 count = ctypes.c_int()
@@ -117,7 +140,7 @@ def mic_sessions_win() -> list[str]:
                         pid = ctypes.c_uint32()
                         _call(ctl2, 14, ctypes.byref(pid))
                         if pid.value and pid.value != os.getpid():
-                            pids.add(pid.value)
+                            pairs.append((dev_id, pid.value))
                     except OSError:
                         continue
                     finally:
@@ -132,8 +155,103 @@ def mic_sessions_win() -> list[str]:
     finally:
         _release(coll)
         _release(enum)
-    names = [process_image(p) for p in pids]
-    return [n.rsplit("\\", 1)[-1].lower() for n in names if n and "meeting agent" not in n.lower()]
+    out: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for dev_id, pid in pairs:
+        name = process_image(pid)
+        if not name or "meeting agent" in name.lower():
+            continue
+        exe = name.rsplit("\\", 1)[-1].lower()
+        key = (dev_id, exe)
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
+def mic_sessions_win() -> list[str]:
+    """exe программ с активной сессией записи на любом микрофоне."""
+    return list(dict.fromkeys(exe for _, exe in _sessions_by_flow(1)))
+
+
+def render_sessions_win() -> list[tuple[str, str]]:
+    """[(device_id, exe_lower), ...] для программ, которые сейчас выводят звук в любой динамик/гарнитуру."""
+    try:
+        return _sessions_by_flow(0)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def default_endpoint_id(data_flow: int = 0, role: int = 0) -> str | None:
+    """ID устройства по умолчанию: data_flow 0=eRender / 1=eCapture; role 0=eConsole, 2=eCommunications."""
+    import ctypes
+
+    CLSCTX_ALL = 23
+    enum, dev = ctypes.c_void_p(), ctypes.c_void_p()
+    try:
+        ctypes.oledll.ole32.CoCreateInstance(ctypes.byref(_guid(_CLSID_ENUM)), None, CLSCTX_ALL,
+                                             ctypes.byref(_guid(_IID_ENUM)), ctypes.byref(enum))
+        _call(enum, 4, ctypes.c_uint(data_flow), ctypes.c_uint(role), ctypes.byref(dev))
+        return _device_id(dev) or None
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        _release(dev)
+        _release(enum)
+
+
+def meeting_render_device_id(source: str | None = None) -> str | None:
+    """Находит ID именно того устройства вывода (гарнитура / eCommunications / динамики),
+    в которое сейчас идёт звук встречи — даже если системный вывод по умолчанию другой."""
+    if not IS_WIN:
+        return None
+    sessions = render_sessions_win()
+    wanted: tuple[str, ...] = ()
+    if source == "zoom":
+        wanted = ("zoom.exe", "cpthost.exe")
+    elif source == "meet":
+        wanted = BROWSERS
+    elif source and source in CALL_APPS:
+        wanted = CALL_APPS[source]
+    else:
+        wanted = ("zoom.exe",) + BROWSERS + tuple(x for v in CALL_APPS.values() for x in v)
+
+    for dev_id, exe in sessions:
+        if dev_id and any(w in exe for w in wanted):
+            return dev_id
+    # Если активной сессии ещё нет, для звонка предпочитаем устройство связи (eCommunications), иначе eConsole.
+    return default_endpoint_id(0, 2) or default_endpoint_id(0, 0)
+
+
+def is_render_device_muted(device_id: str | None = None) -> bool:
+    """True, если на устройстве вывода нажат аппаратный Mute или громкость выставлена в 0."""
+    if not IS_WIN:
+        return False
+    import ctypes
+
+    CLSCTX_ALL = 23
+    enum, dev, vol = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+    try:
+        ctypes.oledll.ole32.CoCreateInstance(ctypes.byref(_guid(_CLSID_ENUM)), None, CLSCTX_ALL,
+                                             ctypes.byref(_guid(_IID_ENUM)), ctypes.byref(enum))
+        if device_id:
+            _call(enum, 5, ctypes.c_wchar_p(device_id), ctypes.byref(dev))
+        else:
+            _call(enum, 4, ctypes.c_uint(0), ctypes.c_uint(0), ctypes.byref(dev))
+        _call(dev, 3, ctypes.byref(_guid(_IID_EPVOL)), ctypes.c_uint(CLSCTX_ALL), ctypes.c_void_p(), ctypes.byref(vol))
+        muted = ctypes.c_int(0)
+        _call(vol, 15, ctypes.byref(muted))  # IAudioEndpointVolume::GetMute
+        if muted.value:
+            return True
+        level = ctypes.c_float(1.0)
+        _call(vol, 9, ctypes.byref(level))   # IAudioEndpointVolume::GetMasterVolumeLevelScalar
+        return level.value <= 0.001
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        _release(vol)
+        _release(dev)
+        _release(enum)
 
 
 def _mic_users_registry() -> list[str]:
@@ -178,8 +296,16 @@ def _mic_users_registry() -> list[str]:
 def active_platform(titles: list[str], platforms: list[str], current: str | None = None) -> str | None:
     """Какая встреча идёт: zoom | teams | telemost | meet | None. current — платформа идущей автозаписи:
     для неё признак мягче (вкладку браузера могли переключить — пока браузер пишет микрофон, встреча идёт)."""
-    if "zoom" in platforms and in_meeting(titles):
-        return "zoom"
+    if "zoom" in platforms:
+        if in_meeting(titles):
+            return "zoom"
+        if IS_WIN:
+            users_now = mic_users_win()
+            if any("zoom.exe" in u for u in users_now):
+                return "zoom"
+            # Переход в сессионный зал (Breakout Room): окно закрылось, но Zoom ещё держит вывод звука.
+            if current == "zoom" and any("zoom.exe" in exe for _, exe in render_sessions_win()):
+                return "zoom"
     if not IS_WIN:
         return None
     users = mic_users_win()
@@ -187,7 +313,7 @@ def active_platform(titles: list[str], platforms: list[str], current: str | None
     def uses(names: tuple) -> bool:
         return any(n in u for u in users for n in names)
 
-    for app in ("teams", "telemost") + CORP:
+    for app in ("teams", "telemost") + MESSENGERS + CORP:
         enabled = app in platforms or (app in CORP and "corp" in platforms)
         if enabled and uses(CALL_APPS[app]):
             return app

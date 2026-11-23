@@ -106,17 +106,37 @@ def _transcribe_all(work: Path, mic: Path | None, others: Path | None, meta: dic
     total = 0.0
     stage("transcribe")
 
-    if mic and mic.exists():
-        mic16 = audio.to_16k_mono(mic, work / "mic_16k.wav")
-        total = max(total, audio.duration(mic16))
-        if audio.is_silent(mic16):
+    mic16 = audio.to_16k_mono(mic, work / "mic_16k.wav") if mic and mic.exists() else None
+    oth16 = audio.to_16k_mono(others, work / "others_16k.wav") if others and others.exists() else None
+
+    # Офлайн-подавление эха (WebRTC AEC3 + GCC-PHAT): если при записи не работало Voice Processing macOS.
+    mic_clean: Path | None = None
+    if (mic16 and oth16 and cfg.get("recording", {}).get("echo_cancel", True)
+            and not meta.get("echo_cancel") and not audio.is_silent(mic16) and not audio.is_silent(oth16)):
+        from . import echo
+        if echo.available():
+            try:
+                mic_clean = echo.cancel(
+                    mic16, oth16,
+                    mic_offset=meta.get("mic_start", t0) - t0,
+                    others_offset=meta.get("others_start", t0) - t0,
+                    out=work / "mic_clean_16k.wav",
+                    muted_intervals=meta.get("speaker_muted"),
+                )
+            except Exception as e:  # noqa: BLE001 — улучшение, не повод ронять обработку
+                log.warning("Подавление эха после встречи не удалось: %s", e)
+
+    if mic16:
+        mic_use = mic_clean or mic16
+        total = max(total, audio.duration(mic_use))
+        if audio.is_silent(mic_use):
             log.info("Микрофон молчал — пропускаю")
         else:
-            mine = [dict(s, speaker=spk["me"]) for s in _with_live(work, "mic", mic16, cfg)]
-            _recheck_names(mine, mic16, cfg, work)
+            raw_mine = transcribe(mic_use, cfg) if mic_clean else _with_live(work, "mic", mic_use, cfg)
+            mine = [dict(s, speaker=spk["me"]) for s in raw_mine]
+            _recheck_names(mine, mic_use, cfg, work)
 
-    if others and others.exists():
-        oth16 = audio.to_16k_mono(others, work / "others_16k.wav")
+    if oth16:
         total = max(total, audio.duration(oth16))
         if not audio.is_silent(oth16):
             # Сначала — кто когда говорил, потом распознаём каждую реплику отдельно:
@@ -159,7 +179,7 @@ def _transcribe_all(work: Path, mic: Path | None, others: Path | None, meta: dic
         me_offset=meta.get("mic_start", t0) - t0,
         others_offset=meta.get("others_start", t0) - t0,
     )
-    for f in ("mic_16k.wav", "others_16k.wav"):
+    for f in ("mic_16k.wav", "mic_clean_16k.wav", "others_16k.wav"):
         (work / f).unlink(missing_ok=True)
     return segments, total
 
@@ -374,6 +394,15 @@ def _write_note(path: Path, work: Path, segments: list[dict], total: float, star
             if track:
                 track.unlink()
         (work / "playback.wav").unlink(missing_ok=True)
+        (work / "playback.m4a").unlink(missing_ok=True)
+    elif cfg["output"].get("keep_audio") and cfg["output"].get("compress_audio", True) and path.is_dir():
+        for name in ("mic", "others"):
+            wav = work / f"{name}.wav"
+            m4a = work / f"{name}.m4a"
+            if wav.exists() and not m4a.exists():
+                if audio.compress_to_m4a(wav, m4a, bitrate=48000):
+                    wav.unlink(missing_ok=True)
+                    log.info("Архив аудио: %s → %s (%.1f МБ)", wav.name, m4a.name, m4a.stat().st_size / 1e6)
 
     log.info("Заметка готова: %s", out)
     notify(cfg, "Заметка по встрече готова", title)

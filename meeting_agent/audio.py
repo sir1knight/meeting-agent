@@ -115,3 +115,64 @@ def repair_wav(path: Path) -> bool:
     except OSError:
         return False
     return False
+
+
+def compress_to_m4a(src: Path, dst: Path, bitrate: int = 48000) -> Path | None:
+    """Сжимает WAV в компактный AAC (.m4a, ~20 МБ/час вместо 345 МБ) через встроенный afconvert (Mac)
+    или ffmpeg (если установлен). Возвращает dst при успехе или None."""
+    part = dst.with_suffix(".part.m4a")
+    try:
+        if not IS_WIN:
+            r = subprocess.run(
+                ["/usr/bin/afconvert", "-f", "m4af", "-d", "aac", "-b", str(bitrate), "-c", "1",
+                 str(src), str(part)],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0 and part.exists() and part.stat().st_size > 1024:
+                part.replace(dst)
+                return dst
+            part.unlink(missing_ok=True)
+        ff = _ffmpeg()
+        if ff:
+            r = subprocess.run(
+                [ff, "-y", "-loglevel", "error", "-i", str(src), "-ac", "1",
+                 "-c:a", "aac", "-b:a", f"{bitrate // 1000}k", "-movflags", "+faststart", str(part)],
+                capture_output=True, text=True,
+            )
+            if r.returncode == 0 and part.exists() and part.stat().st_size > 1024:
+                part.replace(dst)
+                return dst
+            part.unlink(missing_ok=True)
+        if IS_WIN and _compress_av_m4a(src, part, bitrate):
+            part.replace(dst)
+            return dst
+    except OSError:
+        pass
+    part.unlink(missing_ok=True)
+    return None
+
+
+def _compress_av_m4a(src: Path, dst: Path, bitrate: int = 48000) -> bool:
+    """Кодирование в AAC (.m4a) через встроенный PyAV (Windows, без внешнего ffmpeg.exe)."""
+    try:
+        import av
+
+        with av.open(str(src)) as inp, av.open(str(dst), "w", format="ipod") as out:
+            in_stream = inp.streams.audio[0]
+            rate = in_stream.rate or 16000
+            out_stream = out.add_stream("aac", rate=rate)
+            out_stream.layout = "mono"
+            out_stream.bit_rate = bitrate
+            resampler = av.AudioResampler(format="fltp", layout="mono", rate=rate)
+            for frame in inp.decode(in_stream):
+                for rf in resampler.resample(frame):
+                    for pkt in out_stream.encode(rf):
+                        out.mux(pkt)
+            for rf in resampler.resample(None):
+                for pkt in out_stream.encode(rf):
+                    out.mux(pkt)
+            for pkt in out_stream.encode(None):
+                out.mux(pkt)
+        return dst.exists() and dst.stat().st_size > 1024
+    except Exception:  # noqa: BLE001
+        return False

@@ -1456,22 +1456,30 @@ $("recordBtn").addEventListener("click", () => {
   setTimeout(pollStatus, 600);
 });
 $("recStop").addEventListener("click", () => { native("stopRecording"); setTimeout(pollStatus, 600); });
+if ($("recPause")) $("recPause").addEventListener("click", () => { native("togglePause"); setTimeout(pollStatus, 400); });
 
 function renderRecording() {
   const rec = (S.status && S.status.recording) || {};
   const on = rec.state === "recording";
+  const paused = !!(on && rec.paused);
   $("recordBtn").classList.toggle("recording", on);
   $("recordBtn").querySelector(".label").textContent = on ? "Стоп" : "Записать";
   $("recBanner").hidden = !on;
-  if (rec.skip_meeting && !S.skipToastShown) toast("Запись остановлена. Эту встречу Zoom приложение больше не запишет — автозапись включится на следующей.", 7000);
+  $("recBanner").classList.toggle("paused", paused);
+  if ($("recPause")) {
+    $("recPause").textContent = paused ? "Продолжить" : "Пауза";
+  }
+  if (rec.skip_meeting && !S.skipToastShown) toast("Запись остановлена. Эту встречу приложение больше не запишет — автозапись включится на следующей.", 7000);
   S.skipToastShown = !!rec.skip_meeting;
   if ($("nextPeople").hidden !== on) renderNextPeople();  // запись началась или закончилась
   if (on) {
-    const secs = rec.since ? Math.max(0, Math.floor(Date.now() / 1000 - rec.since)) : 0;
+    const secs = rec.since ? Math.max(0, Math.floor(Date.now() / 1000 - rec.since - (rec.paused_seconds || 0))) : 0;
     const t = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
-    const PLAT = { zoom: "Zoom", teams: "Teams", telemost: "Телемоста", meet: "в браузере", jazz: "SaluteJazz",
-      trueconf: "TrueConf", ktalk: "Контур.Толка", vkcalls: "VK Звонков", dion: "Дион", webex: "Webex" };
-    $("recText").textContent = `${PLAT[rec.source] ? "Запись встречи " + PLAT[rec.source] : "Идёт запись"} · ${t}`;
+    const PLAT = { zoom: "Zoom", teams: "Teams", telemost: "Телемоста", meet: "в браузере",
+      slack: "Slack", discord: "Discord", webex: "Webex", telegram: "Telegram", whatsapp: "WhatsApp",
+      jazz: "SaluteJazz", trueconf: "TrueConf", ktalk: "Контур.Толка", vkcalls: "VK Звонков", dion: "Дион" };
+    const head = paused ? "Пауза" : (PLAT[rec.source] ? "Запись встречи " + PLAT[rec.source] : "Идёт запись");
+    $("recText").textContent = `${head} · ${t}`;
   }
   $("recWarn").hidden = !(on && rec.warning);
   $("recWarn").textContent = on && rec.warning ? "⚠ " + rec.warning : "";
@@ -1482,17 +1490,27 @@ function renderRecording() {
 function renderPermissions() {
   const p = (S.status && S.status.permissions) || {};
   const miss = [];
-  if (p.mic === "denied") miss.push(["Микрофон", "без него не записывается ваш голос", "Privacy_Microphone"]);
-  if (p.screen === "denied") miss.push(["Запись экрана и системного звука", "без него не слышно собеседников", "Privacy_ScreenCapture"]);
-  if (p.calendar === "denied") miss.push(["Календари", "без него не подтянутся участники встречи", "Privacy_Calendars"]);
+  if (p.mic === "denied") miss.push(["Микрофон", "без него не записывается ваш голос", "Privacy_Microphone", "Открыть настройки"]);
+  if (p.screen === "granted_needs_restart") {
+    miss.push(["Запись экрана выдана", "перезапустите приложение, чтобы разрешение заработало", "__restart__", "Перезапустить"]);
+  } else if (p.screen === "denied") {
+    const why = p.process_tap
+      ? "нужно для определения заголовков окон Zoom (системный звук пишется отдельно)"
+      : "без него не слышно собеседников";
+    miss.push(["Запись экрана и системного звука", why, "Privacy_ScreenCapture", "Открыть настройки"]);
+  }
+  if (p.calendar === "denied") miss.push(["Календари", "без него не подтянутся участники встречи", "Privacy_Calendars", "Открыть настройки"]);
   $("permBanner").hidden = !miss.length;
-  $("permBanner").innerHTML = miss.length ? `<b>Нет разрешений macOS</b>${miss.map(([t, why, pane]) =>
+  $("permBanner").innerHTML = miss.length ? `<b>Разрешения macOS</b>${miss.map(([t, why, pane, btn]) =>
     `<div class="perm-row"><span>${esc(t)} <span class="muted">— ${esc(why)}</span></span>
-     <button class="link small" type="button" data-pane="${pane}">Открыть настройки</button></div>`).join("")}` : "";
+     <button class="link small" type="button" data-pane="${pane}">${esc(btn)}</button></div>`).join("")}` : "";
 }
 $("permBanner").addEventListener("click", (e) => {
   const b = e.target.closest("[data-pane]");
-  if (b) { native("openPrivacy", { pane: b.dataset.pane }); toast("Включите Meeting Agent в открывшемся разделе. Для записи экрана может понадобиться перезапуск приложения", 7000); }
+  if (!b) return;
+  if (b.dataset.pane === "__restart__") { native("restartApp"); return; }
+  native("openPrivacy", { pane: b.dataset.pane });
+  toast("Включите Meeting Agent в открывшемся разделе — приложение само проверит разрешение", 7000);
 });
 
 // ---------- очередь обработки ----------
@@ -2129,18 +2147,35 @@ function renderSettings() {
 
     <div class="card"><h2>Запись</h2>
       <label class="check"><input type="checkbox" id="sAuto"${s.auto_record ? " checked" : ""}> Записывать встречи автоматически</label>
-      <div class="field" id="sPlatforms"${s.auto_record ? "" : " hidden"}><div class="hint">Где замечать начало встречи:</div>
-        ${[["zoom", "Zoom", "по окну встречи"], ["teams", "Microsoft Teams", "когда Teams включает микрофон"],
+      <div class="field" id="sPlatforms"${s.auto_record ? "" : " hidden"}>
+        ${IS_WIN ? "" : `<div class="radios" style="margin-bottom:8px">
+          <label class="check"><input type="radio" name="autoMode" value="auto"${(s.auto_record_mode || "auto") === "auto" ? " checked" : ""}> Начинать запись сразу</label>
+          <label class="check"><input type="radio" name="autoMode" value="ask"${s.auto_record_mode === "ask" ? " checked" : ""}> Спрашивать перед записью <span class="muted small">— всплывающая плашка с кнопкой «Записать»</span></label>
+        </div>`}
+        <div class="hint">Где замечать начало встречи:</div>
+        ${[["zoom", "Zoom", "по окну встречи (или микрофону без доступа к экрану)"], ["teams", "Microsoft Teams", "когда Teams включает микрофон"],
            ["telemost", "Яндекс Телемост (программа)", "когда Телемост включает микрофон"],
-           ["meet", "Звонки в браузере", "Google Meet, Телемост, Teams в браузере: вкладка звонка и включённый микрофон"],
-           ...(IS_WIN ? [["corp", "SaluteJazz, TrueConf, Контур.Толк, VK Звонки, Дион, Webex", "когда программа включает микрофон"]] : [])]
+           ["meet", "Звонки в браузере", "Google Meet, Телемост, Teams, Jitsi, SaluteJazz, Контур.Толк"],
+           ...(IS_WIN
+             ? [["corp", "SaluteJazz, TrueConf, Контур.Толк, VK Звонки, Дион, Webex", "когда программа включает микрофон"],
+                ["slack", "Slack", "Slack Huddles и звонки"],
+                ["discord", "Discord", "голосовые каналы и звонки"],
+                ["telegram", "Telegram", "звонки в приложении Telegram"],
+                ["whatsapp", "WhatsApp", "звонки в приложении WhatsApp"]]
+             : [["slack", "Slack", "Slack Huddles и звонки"],
+                ["discord", "Discord", "голосовые каналы и звонки"],
+                ["webex", "Webex", "встречи Cisco Webex"],
+                ["telegram", "Telegram", "звонки в приложении Telegram"],
+                ["whatsapp", "WhatsApp", "звонки в приложении WhatsApp"]])]
           .map(([id, t, d]) => `<label class="check"><input type="checkbox" data-platform="${id}"${(s.auto_platforms || []).includes(id) ? " checked" : ""}> ${t} <span class="muted small">— ${d}</span></label>`).join("")}
         <div class="hint">${IS_WIN ? "Для Teams, Телемоста и браузера записывается весь звук компьютера."
-          : "Teams, Телемост и браузер определяются по тому, кто пишет микрофон (нужна macOS 14.2 или новее), записывается весь звук системы."}</div></div>
+          : "Teams, Телемост, мессенджеры и браузер определяются по тому, кто пишет микрофон (нужна macOS 14.2+), записывается весь звук системы."}</div></div>
       ${IS_WIN ? "" : `<label class="check"><input type="checkbox" id="sEcho"${s.echo_cancel ? " checked" : ""}> Подавлять эхо в микрофоне</label>
-      <div class="hint">Если говорите без наушников, голос собеседников из динамиков попадает в микрофон. Подавление эха macOS вычитает его — расшифровка точнее. Действует со следующей записи.</div>
+      <div class="hint">Если говорите без наушников, голос собеседников из динамиков попадает в микрофон. Подавление эха macOS (и WebRTC AEC3 с GCC-PHAT после встречи) вычитает его. Действует со следующей записи.</div>
+      <label class="check"><input type="checkbox" id="sSkipContinuity"${s.skip_continuity_mic !== false ? " checked" : ""}> Не переключаться на микрофон iPhone (Continuity)</label>
+      <div class="hint">macOS иногда сама переводит микрофон на лежащий рядом iPhone. Приложение останется на микрофоне Mac или гарнитуре.</div>
       <label class="check"><input type="checkbox" id="sPill"${s.recording_pill ? " checked" : ""}> Плашка записи поверх окон</label>
-      <div class="hint">Пока идёт запись: время, «Стоп» и «✕ не записывать». Если микрофон молчит или пропал звук собеседников — плашка предупредит.</div>`}
+      <div class="hint">Волна звука, время, пауза, «Стоп» и «✕ не записывать». Сворачивается в мини-капсулу; если микрофон молчит — ищет другой активный вход и предлагает переключиться в один клик.</div>`}
       <label class="check"><input type="checkbox" id="sCalendar"${s.calendar_participants ? " checked" : ""}> Брать название и участников встречи из календаря</label>
       <div class="hint">${IS_WIN ? "Из календаря Outlook (нужен установленный Outlook)." : "Из приложения «Календарь» (аккаунты Exchange, Google, iCloud — Системные настройки → Интернет-аккаунты)."}
         Участники станут списком встречи, если вы не задали его вручную: это помогает подписать собеседников по именам. Календарь не меняется и никуда не отправляется.</div>
@@ -2148,6 +2183,7 @@ function renderSettings() {
         <div class="hint">По ним приложение понимает, что встреча началась. Через запятую.</div>
         <input type="text" id="sTitles" value="${esc(s.window_titles.join(", "))}"></div>
       <label class="check"><input type="checkbox" id="sKeepAudio"${s.keep_audio ? " checked" : ""}> Хранить аудио после обработки (нужно, чтобы позже заново расшифровать)</label>
+      <label class="check" id="sCompressRow"${s.keep_audio ? "" : " hidden"} style="margin-left:22px"><input type="checkbox" id="sCompressAudio"${s.compress_audio !== false ? " checked" : ""}> Сжимать архивное аудио в M4A <span class="muted small">— ~20 МБ/час вместо 690 МБ</span></label>
       <div class="hint">Заметки: ${esc(s.notes_dir)} · <button class="link" id="sReveal">Открыть папку</button></div>
     </div>
 
@@ -2209,19 +2245,25 @@ function renderSettings() {
   if ($("sOpenaiDel")) $("sOpenaiDel").onclick = async () => { if (await save({ openai_key: "" }, "Ключ OpenAI удалён")) renderSettings(); };
   $("sOpenaiModel").onchange = (e) => { if (e.target.value.trim()) { delete S.keyCheck.openai; save({ openai_model: e.target.value }, "Модель ChatGPT: " + e.target.value.trim()); } };
   $("sAuto").onchange = (e) => { save({ auto_record: e.target.checked }); native("reloadSettings"); $("sPlatforms").hidden = !e.target.checked; };
+  $("settings").querySelectorAll('input[name="autoMode"]').forEach((r) => r.onchange = async () => {
+    await save({ auto_record_mode: r.value });
+    native("reloadSettings");
+  });
   $("settings").querySelectorAll("[data-platform]").forEach((c) => c.onchange = async () => {
     const list = [...$("settings").querySelectorAll("[data-platform]:checked")].map((x) => x.dataset.platform);
     await save({ auto_platforms: list });
     native("reloadSettings");
   });
   if ($("sEcho")) $("sEcho").onchange = async (e) => { await save({ echo_cancel: e.target.checked }); native("reloadSettings"); };
+  if ($("sSkipContinuity")) $("sSkipContinuity").onchange = async (e) => { await save({ skip_continuity_mic: e.target.checked }); native("reloadSettings"); };
   if ($("sPill")) $("sPill").onchange = async (e) => { await save({ recording_pill: e.target.checked }); native("reloadSettings"); };
   $("sCalendar").onchange = async (e) => {
     await save({ calendar_participants: e.target.checked }, e.target.checked ? "Участники будут браться из календаря" : "Календарь не используется");
     if (e.target.checked) native("calendarAccess");
     native("reloadSettings");
   };
-  $("sKeepAudio").onchange = (e) => save({ keep_audio: e.target.checked });
+  $("sKeepAudio").onchange = (e) => { save({ keep_audio: e.target.checked }); if ($("sCompressRow")) $("sCompressRow").hidden = !e.target.checked; };
+  if ($("sCompressAudio")) $("sCompressAudio").onchange = (e) => save({ compress_audio: e.target.checked });
   $("sReveal").onclick = () => api("reveal", { method: "POST", body: {} });
   $("sHfSave").onclick = async () => {
     const v = $("sHf").value.trim();
