@@ -56,7 +56,8 @@ DEFAULTS = {
     "names": {"guess": True},
     "live": {"enabled": True},
     "recording": {"echo_cancel": True, "pill": True, "skip_continuity_mic": True},
-    "app": {"auto_record": True, "auto_record_mode": "auto"},
+    "app": {"auto_record": True, "auto_record_mode": "auto", "show_in_tray": True,
+            "minimize_to_tray": True, "launch_at_login": False},
     "ask": {"backend": "", "gemini_model": "gemini-3.8-flash"},
     "llm": {
         "backend": "local",

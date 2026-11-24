@@ -550,22 +550,53 @@ def set_autostart(on: bool) -> None:
                 pass
 
 
+def _ensure_app_ico() -> Path | None:
+    """Создаёт мультиразмерный .ico (16..256 px) для окна pywebview, панели задач и ярлыка."""
+    ico = HOME / "app-icon.ico"
+    if ico.exists() and ico.stat().st_size > 1000:
+        return ico
+    try:
+        from PIL import Image, ImageDraw
+
+        size = 256
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle((8, 8, size - 8, size - 8), radius=56, fill=(47, 111, 228, 255))
+        bars = (56, 120, 88, 148, 72)
+        for i, h in enumerate(bars):
+            x = 50 + i * 36
+            y0 = (size - h) // 2
+            d.rounded_rectangle((x, y0, x + 20, y0 + h), radius=10, fill=(255, 255, 255, 255))
+        HOME.mkdir(parents=True, exist_ok=True)
+        img.save(ico, format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+        return ico
+    except Exception as e:
+        log.warning("Не удалось создать иконку окна: %s", e)
+        return None
+
+
 def ensure_start_menu_shortcut() -> None:
     """Ярлык в меню «Пуск» (один раз и после переноса папки приложения)."""
     programs = Path(os.environ.get("APPDATA", "")) / "Microsoft/Windows/Start Menu/Programs"
     link = programs / f"{TITLE}.lnk"
     marker = HOME / "shortcut.txt"
-    if link.exists() and marker.exists() and marker.read_text(encoding="utf-8") == EXE:
+    ico = _ensure_app_ico()
+    icon_loc = f"{EXE},0" if Path(EXE).exists() else (str(ico) if ico else "")
+    sig = f"{EXE}|{icon_loc}"
+    if link.exists() and marker.exists() and marker.read_text(encoding="utf-8") == sig:
         return
+
     def q(v) -> str:  # строка PowerShell в одинарных кавычках: апостроф удваивается (C:\Users\O'Connor)
         return "'" + str(v).replace("'", "''") + "'"
 
     ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({q(link)});"
-          f"$s.TargetPath={q(EXE)};$s.WorkingDirectory={q(Path(EXE).parent)};$s.Save()")
+          f"$s.TargetPath={q(EXE)};$s.WorkingDirectory={q(Path(EXE).parent)};"
+          + (f"$s.IconLocation={q(icon_loc)};" if icon_loc else "")
+          + "$s.Save()")
     r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
                        capture_output=True, creationflags=osutil.CREATE_NO_WINDOW)
     if r.returncode == 0:
-        marker.write_text(EXE, encoding="utf-8")
+        marker.write_text(sig, encoding="utf-8")
         if autostart_enabled():
             set_autostart(True)  # путь к программе мог поменяться
 
@@ -578,6 +609,9 @@ class App:
         self.recording = Recording(self.backend)
         self.window = None
         self.icon = None
+        self.show_in_tray = True
+        self.minimize_to_tray = True
+        self._hicons: list = []
         self.processing = 0
         self.failed = 0
         self.seen_done: set[str] = set()
@@ -596,7 +630,10 @@ class App:
         elif cmd == "togglePause":
             threading.Thread(target=self.recording.toggle_pause, daemon=True).start()
         elif cmd == "reloadSettings":
-            threading.Thread(target=self.recording.reload_settings, daemon=True).start()
+            def _reload():
+                self.recording.reload_settings()
+                self._apply_tray_settings()
+            threading.Thread(target=_reload, daemon=True).start()
         elif cmd == "restartApp":
             threading.Thread(target=self._restart, daemon=True).start()
         elif cmd == "openURL" and str(msg.get("url", "")).startswith(("https://", "http://")):
@@ -723,9 +760,81 @@ class App:
         if self.window:
             self.window.destroy()
 
-    def run(self) -> None:
-        import pystray
+    def _start_tray(self) -> None:
+        if self.icon is not None:
+            return
+        try:
+            import pystray
 
+            icon = pystray.Icon("MeetingAgent", self._image(), TITLE, self._menu())
+            self.icon = icon
+
+            def _run_icon() -> None:
+                try:
+                    icon.run()
+                except Exception:
+                    log.exception("Сбой значка в трее")
+
+            threading.Thread(target=_run_icon, daemon=True, name="tray-icon").start()
+        except Exception:
+            log.exception("Не удалось создать значок в трее")
+
+    def _stop_tray(self) -> None:
+        icon = self.icon
+        self.icon = None
+        if icon is not None:
+            try:
+                icon.stop()
+            except Exception:
+                pass
+
+    def _apply_tray_settings(self) -> None:
+        s = self.backend.get("settings") or {}
+        self.show_in_tray = bool(s.get("show_in_tray", True))
+        self.minimize_to_tray = bool(s.get("minimize_to_tray", True))
+        if self.show_in_tray:
+            self._start_tray()
+        else:
+            self._stop_tray()
+
+    def _apply_window_icon(self) -> None:
+        """Назначает фирменную иконку окну pywebview (заголовок, Alt+Tab, панель задач Windows)."""
+        from ctypes import wintypes
+
+        ico = _ensure_app_ico()
+        if not ico or not ico.exists():
+            return
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        user32.FindWindowW.restype = wintypes.HWND
+        user32.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+                                      ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        user32.LoadImageW.restype = wintypes.HANDLE
+        user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+
+        hwnd = None
+        for _ in range(50):  # ждём появления окна WinForms до 10 с
+            if self.quitting:
+                return
+            hwnd = user32.FindWindowW(None, TITLE)
+            if hwnd:
+                break
+            time.sleep(0.2)
+        if not hwnd:
+            return
+        IMAGE_ICON, LR_LOADFROMFILE = 1, 0x0010
+        WM_SETICON, ICON_SMALL, ICON_BIG = 0x0080, 0, 1
+        h_sm = user32.LoadImageW(None, str(ico), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
+        h_big = user32.LoadImageW(None, str(ico), IMAGE_ICON, 48, 48, LR_LOADFROMFILE)
+        if h_sm:
+            self._hicons.append(h_sm)
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_sm)
+        if h_big:
+            self._hicons.append(h_big)
+            user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, h_big)
+
+    def run(self) -> None:
         self.backend.start()
         if not self.backend.wait_ready():
             _message("Не удалось запустить Meeting Agent. Подробности — в файле\n"
@@ -743,8 +852,7 @@ class App:
         except Exception as e:
             log.warning("Ярлык в меню «Пуск» не создан: %s", e)
 
-        self.icon = pystray.Icon("MeetingAgent", self._image(), TITLE, self._menu())
-        threading.Thread(target=self.icon.run, daemon=True).start()
+        self._apply_tray_settings()
 
         try:
             import webview
@@ -753,12 +861,17 @@ class App:
                                                 min_size=(820, 560), js_api=Bridge(self), text_select=True)
 
             def closing():
-                if self.quitting:
+                if self.quitting or not self.minimize_to_tray or not self.show_in_tray:
+                    self.quitting = True
+                    if self.recording.is_recording:
+                        self.recording.stop("выход из приложения")
+                    self._stop_tray()
                     return True
-                self.window.hide()  # закрытие окна прячет его: запись и автозапись продолжают работать
+                self.window.hide()  # закрытие окна прячет его в трей: запись и автозапись продолжают работать
                 return False
 
             self.window.events.closing += closing
+            threading.Thread(target=self._apply_window_icon, daemon=True, name="win-icon").start()
             webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
             webview.start(gui="edgechromium", private_mode=False, storage_path=str(HOME / "webview"))
         except Exception as e:
@@ -776,6 +889,7 @@ class App:
             while not self.quitting:
                 time.sleep(1)
         self.quitting = True
+        self._stop_tray()
         self.backend.stop()
 
 
@@ -892,6 +1006,11 @@ def main() -> None:
                         format="%(asctime)s  %(name)s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)  # чёткий текст на экранах с масштабом
+    except Exception:
+        pass
+    try:
+        # Привязываем окно и иконку на панели задач к Meeting Agent, а не к pythonw.exe.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MeetingAgent.App")
     except Exception:
         pass
     if _already_running():

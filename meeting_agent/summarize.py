@@ -598,8 +598,37 @@ def split_chunks(text: str, size: int) -> list[str]:
     return chunks
 
 
+def _spoken_lines(transcript: str) -> list[str]:
+    """Извлекает только произнесённый текст без таймкодов и меток спикеров."""
+    lines = []
+    for raw in transcript.splitlines():
+        s = re.sub(r"^\s*\*\*\[[\d:]+\]\s*[^*:]+:\*\*\s*", "", raw).strip()
+        s = re.sub(r"^\s*\[[\d:]+\]\s*[^:]+:\s*", "", s).strip()
+        if s:
+            lines.append(s)
+    return lines
+
+
 def summarize(transcript: str, cfg: dict, template: str) -> tuple[str, str]:
     """Возвращает (название, markdown-протокол)."""
+    spoken = _spoken_lines(transcript)
+    words = re.findall(r"[0-9A-Za-zА-Яа-яЁё]+", " ".join(spoken))
+    cal = cfg.get("meeting", {}).get("calendar") or {}
+    if len(words) < 20:
+        # На сверхкоротких/тестовых записях (< 20 слов) локальные 7B-модели склонны выдумывать
+        # «типовую рабочую встречу» про MVP и API — возвращаем честный итог без вызова LLM.
+        log.info("Короткая запись (%d слов) — пропускаю генерацию протокола LLM", len(words))
+        if cal.get("title"):
+            title = str(cal["title"]).strip()
+        elif words:
+            title = " ".join(words[:6]).capitalize()
+        else:
+            title = "Короткая запись"
+        quote = "\n".join(f"> {line}" for line in spoken[:5])
+        body = (f"## Кратко\n\nЗапись слишком короткая для составления протокола "
+                f"(распознано слов: {len(words)})." + (f"\n\n{quote}" if quote else ""))
+        return title, body
+
     instructions = template_text(template)
     chunks = split_chunks(transcript, chunk_size(cfg))
     if len(chunks) <= 1:
@@ -619,12 +648,17 @@ def summarize(transcript: str, cfg: dict, template: str) -> tuple[str, str]:
     hint = protocol_hint(cfg)
     if hint:
         source = hint + "\n\n" + source
-    cal = cfg.get("meeting", {}).get("calendar") or {}
     if cal.get("title"):
         source = (f"Название встречи в календаре: «{cal['title']}». Используй его как подсказку "
                   "о теме, но заголовок пиши по содержанию разговора.\n\n" + source)
+    short_rule = (
+        "\n\nВАЖНО: запись короткая. Опирайся СТРОГО на факты, имена и таймкоды из расшифровки ниже. "
+        "Запрещено выдумывать проекты, решения, задачи, сроки, имена или круглые таймкоды (01:00, 02:00), "
+        "которых нет в тексте; если для раздела нет данных — пропусти его."
+        if len(words) < 120 else ""
+    )
     log.info("Итоговое саммари…")
-    return parse_title(chat(cfg, f"{instructions}{TIMES_RULE}\n\n{source}"))
+    return parse_title(chat(cfg, f"{instructions}{TIMES_RULE}{short_rule}\n\n{source}"))
 
 
 def parse_title(text: str) -> tuple[str, str]:

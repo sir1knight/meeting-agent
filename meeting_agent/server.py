@@ -320,7 +320,20 @@ def get_settings(cfg: dict) -> dict:
         "echo_cancel": cfg.get("recording", {}).get("echo_cancel", True),
         "skip_continuity_mic": cfg.get("recording", {}).get("skip_continuity_mic", True),
         "recording_pill": cfg.get("recording", {}).get("pill", True),
+        "show_in_tray": bool(cfg.get("app", {}).get("show_in_tray", True)),
+        "minimize_to_tray": bool(cfg.get("app", {}).get("minimize_to_tray", True)),
+        "launch_at_login": _launch_at_login_state(cfg),
     }
+
+
+def _launch_at_login_state(cfg: dict) -> bool:
+    if osutil.IS_WIN:
+        try:
+            from . import winapp
+            return winapp.autostart_enabled()
+        except Exception:  # noqa: BLE001
+            return False
+    return bool(cfg.get("app", {}).get("launch_at_login", False))
 
 
 def save_settings(data: dict) -> None:
@@ -362,9 +375,18 @@ def save_settings(data: dict) -> None:
                                  "recommended_applied": ("app", "recommended_applied"),
                                  "echo_cancel": ("recording", "echo_cancel"),
                                  "skip_continuity_mic": ("recording", "skip_continuity_mic"),
-                                 "recording_pill": ("recording", "pill")}.items():
+                                 "recording_pill": ("recording", "pill"),
+                                 "show_in_tray": ("app", "show_in_tray"),
+                                 "minimize_to_tray": ("app", "minimize_to_tray"),
+                                 "launch_at_login": ("app", "launch_at_login")}.items():
         if isinstance(data.get(key), bool):
             put(section, name, data[key])
+    if isinstance(data.get("launch_at_login"), bool) and osutil.IS_WIN:
+        from . import winapp
+        try:
+            winapp.set_autostart(data["launch_at_login"])
+        except OSError as e:
+            raise ValueError(f"Не удалось изменить автозапуск Windows: {e}") from e
     if isinstance(data.get("claude_code_model"), str):
         put("claude", "code_model", data["claude_code_model"].strip())
     for key, section in {"gemini_model": "gemini", "openai_model": "openai"}.items():

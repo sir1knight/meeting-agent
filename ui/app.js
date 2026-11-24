@@ -2218,6 +2218,8 @@ const ST_ICONS = {
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
   link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>',
   palette: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18.37 2.63L14 7l-1.59-1.59a2 2 0 0 0-2.82 0L8 7l9 9 1.59-1.59a2 2 0 0 0 0-2.82L17 10l4.37-4.37a2.12 2.12 0 1 0-3-3z"/><path d="M9 8c-2 3-4 3.5-7 4l8 10c2-1 6-5 6-7"/></svg>',
+  rocket: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>',
+  tray: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="15" x2="21" y2="15"/><circle cx="17" cy="17.5" r="1" fill="currentColor" stroke="none"/></svg>',
 };
 
 function getTheme() {
@@ -2281,7 +2283,18 @@ function renderSettings() {
 
   let body = "";
   if (settingsTab === "general") {
+    const showTray = s.show_in_tray !== false;
+    const minTray = s.minimize_to_tray !== false;
     body = stSection("Общие настройки", [
+      stRow("rocket", "Запуск при входе в систему", "Открывать приложение автоматически после входа в систему",
+        stSwitch("sLaunchAtLogin", !!s.launch_at_login)),
+      stRow("tray", IS_WIN ? "Значок в системном трее" : "Значок в строке меню (трее)",
+        IS_WIN ? "Показывать значок рядом с часами для быстрого доступа и работы в фоне"
+               : "Показывать значок в верхней строке меню для быстрого старта записи и работы в фоне",
+        stSwitch("sShowInTray", showTray)),
+      stRow("window", "Сворачивать в трей при закрытии окна",
+        "При закрытии окна автозапись и обработка встреч продолжат работать в фоне",
+        stSwitch("sMinimizeToTray", minTray, !showTray), showTray ? "" : "disabled"),
       stRow("user", "Как вас зовут", "Распознавание точнее пишет обращение к вам, а протокол подписывает ваши задачи по имени",
         `<input class="st-input" type="text" id="sMyName" maxlength="60" placeholder="Например, Ильяс" value="${esc(s.my_name || "")}">`),
       stRow("calendar", "Участники из календаря",
@@ -2525,6 +2538,25 @@ function renderSettings() {
   if ($("sTheme")) $("sTheme").onchange = (e) => {
     applyTheme(e.target.value);
     toast("Тема обновлена");
+  };
+  if ($("sLaunchAtLogin")) $("sLaunchAtLogin").onchange = async (e) => {
+    const on = e.target.checked;
+    if (IS_WIN) {
+      await save({ launch_at_login: on }, on ? "Автозапуск при входе в Windows включён" : "Автозапуск отключён");
+    } else {
+      await save({ launch_at_login: on }, on ? "Автозапуск при входе в систему включён" : "Автозапуск отключён");
+      native("setLaunchAtLogin", { on });
+    }
+  };
+  if ($("sShowInTray")) $("sShowInTray").onchange = async (e) => {
+    const on = e.target.checked;
+    await save({ show_in_tray: on }, on ? "Значок в трее включён" : "Значок в трее скрыт");
+    native("reloadSettings");
+    renderSettings();
+  };
+  if ($("sMinimizeToTray")) $("sMinimizeToTray").onchange = async (e) => {
+    await save({ minimize_to_tray: e.target.checked }, e.target.checked ? "Закрытие окна сворачивает в трей" : "Закрытие окна завершает приложение");
+    native("reloadSettings");
   };
   if ($("sEcho")) $("sEcho").onchange = async (e) => { await save({ echo_cancel: e.target.checked }); native("reloadSettings"); };
   if ($("sSkipContinuity")) $("sSkipContinuity").onchange = async (e) => { await save({ skip_continuity_mic: e.target.checked }); native("reloadSettings"); };

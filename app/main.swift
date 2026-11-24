@@ -50,12 +50,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case "togglePause": self.recording.togglePause()
             case "reloadSettings": self.recording.reloadSettings()
             case "calendarAccess": self.recording.requestCalendarAccess()
+            case "setLaunchAtLogin": self.setLaunchAtLogin((args["on"] as? Bool) ?? false)
             case "restartApp": self.relaunchSelf()
             default: break
             }
         }
         backend.onReady = { [weak self] in
             guard let self else { return }
+            self.backend.post("settings", ["launch_at_login": SMAppService.mainApp.status == .enabled])
             self.recording.reloadSettings()
             self.recording.notifyBackend()
             self.window.showAndFocus()
@@ -83,6 +85,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Строка меню
 
     private func updateIcon() {
+        statusItem?.isVisible = recording.showInTray
+        window.keepInTrayOnClose = recording.showInTray && recording.minimizeToTray
+        if !recording.showInTray && NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
         guard let button = statusItem?.button else { return }
         let symbol: String
         if recording.isRecording { symbol = recording.isPaused ? "pause.circle.fill" : "record.circle.fill" }
@@ -177,15 +184,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func toggleLogin() {
+        setLaunchAtLogin(SMAppService.mainApp.status != .enabled)
+    }
+
+    private func setLaunchAtLogin(_ on: Bool) {
         do {
-            if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
-            else { try SMAppService.mainApp.register() }
+            if on {
+                if SMAppService.mainApp.status != .enabled { try SMAppService.mainApp.register() }
+            } else {
+                if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
+            }
         } catch {
             let a = NSAlert()
             a.messageText = "Не удалось изменить автозапуск"
             a.informativeText = "Переместите Meeting Agent в папку «Программы» и попробуйте снова. (\(error.localizedDescription))"
             a.runModal()
         }
+        backend.post("settings", ["launch_at_login": SMAppService.mainApp.status == .enabled])
     }
 
     // MARK: - Состояние обработки (для значка)

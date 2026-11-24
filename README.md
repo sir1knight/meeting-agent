@@ -4,7 +4,7 @@
 
 Сам замечает начало встречи в Zoom, Teams, Яндекс Телемосте или звонка в браузере и записывает её. Когда встреча заканчивается, расшифровывает разговор, разделяет собеседников и пишет протокол: кратко, решения, задачи (кто, что, срок) и открытые вопросы.
 
-Работает на **Mac (Apple Silicon)** и **Windows 10/11**. Готовые сборки — в [релизах на GitLab](https://gitlab.com/sir1knight/Meeting_agent/-/releases) (Windows: маленький установщик). Код — на [GitVerse](https://gitverse.ru/sir1knight/Meeting_agent) и [GitLab](https://gitlab.com/sir1knight/Meeting_agent).
+Работает на **Mac (Apple Silicon)** и **Windows 10/11**. Универсальные лёгкие установщики — на [GitHub Releases](https://github.com/sir1knight/meeting-agent/releases/tag/installers) и [GitLab](https://gitlab.com/sir1knight/Meeting_agent/-/releases). Код — на [GitHub](https://github.com/sir1knight/meeting-agent), [GitLab](https://gitlab.com/sir1knight/Meeting_agent) и [GitVerse](https://gitverse.ru/sir1knight/Meeting_agent).
 
 **Звук и расшифровка всегда распознаются на вашем компьютере.** В сеть может уйти только текст расшифровки — и только если для протоколов выбран облачный вариант.
 
@@ -56,23 +56,28 @@
 
 ## Установка и обновления
 
-**Windows — два варианта:**
-- `Meeting-Agent-Windows-Setup.zip` (~11 МБ, [релизы на GitLab](https://gitlab.com/sir1knight/Meeting_agent/-/releases)) — маленький установщик: Python и код; `uv` скачивается с PyPI. При первом запуске открывается окно «Установка компонентов» и скачивает пакеты Python (~350 МБ, 3–10 минут) с PyPI — строго версии из `requirements-windows.lock`. Нужен доступ к pypi.org.
-- `Meeting-Agent-Windows.zip` (~350 МБ) — полный архив, ничего не докачивает (для компьютеров без доступа к PyPI).
+### Универсальные лёгкие установщики (GitHub Releases)
 
-**Mac:** `Meeting-Agent.zip` (~465 МБ) — приложение целиком.
+Ссылки постоянные — при первом запуске установщик **сам подтянет самую свежую версию кода** и нужные пакеты Python, поэтому переустанавливать его после каждого релиза не нужно:
 
-**Обновления по компонентам** (Настройки → Обновления → «Проверить обновления»), без переустановки:
+- **Mac (Apple Silicon):** [Скачать Meeting-Agent-Mac.zip (~1,1 МБ)](https://github.com/sir1knight/meeting-agent/releases/download/installers/Meeting-Agent-Mac.zip) — приложение без встроенного Python; перетащите `Meeting Agent.app` в «Программы» и запустите (при первом запуске само скачает Python 3.12, актуальный код и пакеты).
+- **Windows 10/11:** [Скачать Meeting-Agent-Windows-Setup.zip (~11 МБ)](https://github.com/sir1knight/meeting-agent/releases/download/installers/Meeting-Agent-Windows-Setup.zip) — `Meeting Agent.exe`, Python, `uv` и код. Распакуйте в короткую папку (например, `C:\MeetingAgent`) и запустите `Meeting Agent.exe` — окно «Установка компонентов» само подтянет свежий код и пакеты Python (~350 МБ, 3–10 минут).
+
+Все релизы: [GitHub](https://github.com/sir1knight/meeting-agent/releases) · [GitLab](https://gitlab.com/sir1knight/Meeting_agent/-/releases). *(Полные офлайн-архивы ~350–450 МБ без доступа к PyPI собираются локально через `./build_app.sh` и `./build_windows.sh`.)*
+
+### Обновления по компонентам
+
+Открываются через **Настройки → Система → Обновления** («Проверить обновления»), без переустановки:
 
 | Компонент | Откуда | Как обновляется |
 |---|---|---|
-| Код и интерфейс | архив ветки `main` с GitVerse (~300 КБ) | по кнопке «Обновить»: скачивается в `<данные>/app-code/<версия>`, проверяется запуском и подменяет встроенный; сервер перезапускается сам |
-| Пакеты Python (Windows) | PyPI, по `requirements-windows.lock` из новой версии | при следующем запуске приложения, в окне консоли («Перезапустить и обновить») |
+| Код и интерфейс | архив ветки `main` с GitHub, GitLab или GitVerse (~400 КБ) — откуда быстрее | по кнопке «Обновить»: скачивается в `<данные>/app-code/<версия>`, проверяется запуском и подменяет встроенный; сервер перезапускается сам |
+| Пакеты Python | PyPI, по `requirements-*.lock` из новой версии | при следующем запуске приложения («Перезапустить и обновить») |
 | Модели | Hugging Face | отдельно, в карточке «Модели» |
-| Ускорение NVIDIA | GitHub llama.cpp и PyPI | кнопкой в карточке «Ускорение NVIDIA» |
-| Оболочка (Swift-приложение / Meeting Agent.exe и Python) | — | только новой версией приложения целиком: если она нужна, приложение так и скажет |
+| Ускорение NVIDIA (Windows) | GitHub llama.cpp и PyPI | кнопкой в карточке «Ускорение NVIDIA» |
+| Оболочка (Swift-приложение / Meeting Agent.exe) | GitLab / GitHub Releases | на Mac — по кнопке прямо из окна «Обновления» (~1,1 МБ); на Windows — скачиванием нового `Meeting-Agent-Windows-Setup.zip` (нужна редко) |
 
-Версия и требования к оболочке — `version.json` в корне репозитория (`app` — версия кода, `shell` — какая оболочка нужна). «Вернуться к версии из приложения» удаляет скачанное обновление. GitVerse ограничивает частоту анонимных запросов, поэтому при проверке бывает пауза до минуты.
+Версия и требования к оболочке — `version.json` в корне репозитория (`app` — версия кода, `shell` — какая оболочка нужна). «Вернуться к версии из приложения» удаляет скачанное обновление.
 
 ## Windows: подбор под компьютер и ускорение NVIDIA (CUDA)
 

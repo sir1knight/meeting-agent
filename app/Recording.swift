@@ -50,6 +50,8 @@ final class RecordingController {
     // защита от iPhone Continuity Mic и поиск активного микрофона.
     private var echoCancel = true
     private var skipContinuityMic = true
+    private(set) var showInTray = true
+    private(set) var minimizeToTray = true
     let pill = RecordingPill()
     private let meetingPrompt = MeetingPromptPanel()
     private var healthTimer: Timer?
@@ -136,6 +138,8 @@ final class RecordingController {
             self.calendarEnabled = s["calendar_participants"] as? Bool ?? false
             self.echoCancel = s["echo_cancel"] as? Bool ?? true
             self.skipContinuityMic = s["skip_continuity_mic"] as? Bool ?? true
+            self.showInTray = s["show_in_tray"] as? Bool ?? true
+            self.minimizeToTray = s["minimize_to_tray"] as? Bool ?? true
             self.pill.enabled = s["recording_pill"] as? Bool ?? true
             if self.pill.enabled, let since = self.since, let rec = self.recorder {
                 self.pill.show(since: since, title: self.pillTitle(), pausedSeconds: { [weak rec] in rec?.currentPausedSeconds() ?? 0 })

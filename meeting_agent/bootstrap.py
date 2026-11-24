@@ -15,7 +15,7 @@ from pathlib import Path
 
 from . import config
 from .osutil import IS_WIN
-from .updates import lock_file, lock_hash, site_packages
+from .updates import KEEP, SOURCES, _manifest, _vt, lock_file, lock_hash, overlay_dir, platform, shell_version, site_packages
 
 LLAMA_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 # uv не входит в маленький установщик (GitVerse не принимает файлы больше ~12 МБ): берём его с PyPI,
@@ -79,9 +79,102 @@ def _pause() -> None:
         input("\nНажмите Enter, чтобы закрыть окно…")
 
 
+def _fetch_latest_code() -> Path | None:
+    """Универсальный установщик: на свежей установке (или при обновлении пакетов) тихо проверяет
+    последнюю версию кода на GitHub / GitLab / GitVerse (только стандартная библиотека, без requests).
+    Если вышла версия новее встроенной и совместимая с оболочкой — скачивает её сразу, чтобы установить
+    актуальный список пакетов и сразу запустить свежую версию без повторного перезапуска."""
+    import base64
+    import json
+    import shutil
+    import urllib.request
+    import zipfile
+
+    cur_ver = _manifest(config.ROOT).get("app", "0")
+    my_shell = shell_version()
+    plat = platform()
+    best: tuple[str, dict] | None = None
+    for name in ("GitHub", "GitLab", "GitVerse"):
+        src = SOURCES.get(name)
+        if not src:
+            continue
+        try:
+            with urllib.request.urlopen(src["manifest"], timeout=10) as r:
+                raw = r.read()
+            m = (json.loads(base64.b64decode(json.loads(raw)["content"]).decode("utf-8"))
+                 if name == "GitVerse" else json.loads(raw.decode("utf-8")))
+            if best is None or _vt(m.get("app", "0")) > _vt(best[1].get("app", "0")):
+                best = (name, m)
+        except Exception:  # noqa: BLE001 — нет доступа к площадке, пробуем следующую
+            continue
+    if not best:
+        return None
+    first, m = best
+    latest = m.get("app", "0")
+    need_shell = (m.get("shell") or {}).get(plat, 1)
+    if _vt(latest) <= _vt(cur_ver) or need_shell > my_shell:
+        return None
+
+    base = overlay_dir()
+    final = base / latest
+    if (final / "meeting_agent" / "__init__.py").exists():
+        (base / "current.txt").write_text(latest, encoding="utf-8")
+        return final
+
+    print(f"Найдена свежая версия {latest} (установщик {cur_ver}) — скачиваю обновление…", flush=True)
+    base.mkdir(parents=True, exist_ok=True)
+    tmp = base / f".{latest}.bootstrap"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
+    archive = base / ".bootstrap-code.zip"
+    order = [first] + [n for n in ("GitHub", "GitLab", "GitVerse") if n != first and n in SOURCES]
+    downloaded = False
+    for name in order:
+        try:
+            with urllib.request.urlopen(SOURCES[name]["archive"], timeout=30) as r, open(archive, "wb") as out:
+                while chunk := r.read(1 << 18):
+                    out.write(chunk)
+            downloaded = True
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    if not downloaded:
+        shutil.rmtree(tmp, ignore_errors=True)
+        archive.unlink(missing_ok=True)
+        return None
+    try:
+        with zipfile.ZipFile(archive) as z:
+            for info in z.infolist():
+                parts = Path(info.filename).parts
+                if len(parts) < 2 or parts[1] not in KEEP or info.is_dir():
+                    continue
+                dest = tmp.joinpath(*parts[1:])
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(info) as s_in, open(dest, "wb") as s_out:
+                    shutil.copyfileobj(s_in, s_out)
+    except Exception:  # noqa: BLE001
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    finally:
+        archive.unlink(missing_ok=True)
+
+    got = _manifest(tmp).get("app")
+    if not (tmp / "meeting_agent" / "__init__.py").exists() or not got:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    final = base / got
+    shutil.rmtree(final, ignore_errors=True)
+    tmp.rename(final)
+    (base / "current.txt").write_text(got, encoding="utf-8")
+    (base / "pending.txt").unlink(missing_ok=True)
+    print(f"Код обновлён до {got}.\n", flush=True)
+    return final
+
+
 def run() -> int:
-    lock = lock_file()
     print("Meeting Agent — установка компонентов\n", flush=True)
+    fresh = _fetch_latest_code()
+    lock = lock_file(fresh) if fresh else lock_file()
     print(f"Скачиваются пакеты Python (около {'350 МБ' if IS_WIN else '600 МБ'}): распознавание речи, разделение "
           "собеседников, локальная модель протоколов. Это нужно один раз, потом — только при обновлениях.\n", flush=True)
     uv = uv_exe()

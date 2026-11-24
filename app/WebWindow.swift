@@ -8,6 +8,7 @@ final class WebWindowController: NSWindowController, WKScriptMessageHandler, WKN
     private let backend: Backend
     private let webView: WKWebView
     var onCommand: ((String, [String: Any]) -> Void)?
+    var keepInTrayOnClose = true
 
     init(backend: Backend) {
         self.backend = backend
@@ -54,7 +55,11 @@ final class WebWindowController: NSWindowController, WKScriptMessageHandler, WKN
     }
 
     func windowWillClose(_ notification: Notification) {
-        NSApp.setActivationPolicy(.accessory)  // остаётся только значок в строке меню
+        if keepInTrayOnClose {
+            NSApp.setActivationPolicy(.accessory)  // остаётся только значок в строке меню
+        } else {
+            NSApp.terminate(nil)
+        }
     }
 
     // MARK: - Сообщения из интерфейса
