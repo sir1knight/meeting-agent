@@ -26,6 +26,7 @@
         <span id="recText">Идёт запись</span>
       </div>
       <div class="rec-banner-acts">
+        <button id="recLive" class="rec-pill-btn live-btn" title="Открыть живую расшифровку разговора">Живой текст</button>
         <button id="recPause" class="rec-pill-btn" title="Поставить запись на паузу или продолжить">Пауза</button>
         <button id="recPeople" class="rec-pill-btn" title="Кто на этой встрече">Участники</button>
         <button id="recStop" class="rec-pill-btn stop">Стоп</button>
@@ -131,6 +132,7 @@
         <div id="askNote" class="muted small"></div>
       </div>
     </section>
+    <section id="live" hidden></section>
     <section id="voices" hidden></section>
     <section id="settings" hidden></section>
     <section id="setup" hidden></section>
@@ -144,6 +146,7 @@
     <h2>Пересоздать протокол</h2>
     <label>Шаблон <select id="redoTemplate"></select></label>
     <label>Кто пишет протокол <select id="redoLlm"></select></label>
+    <label id="redoModelRow" hidden>Модель <select id="redoModel"></select></label>
     <label class="check"><input type="checkbox" id="redoRetranscribe"> Заново расшифровать аудио (дольше)</label>
     <label id="redoAsrRow" hidden>Чем распознавать <select id="redoAsr"></select></label>
     <div class="dlg-actions">

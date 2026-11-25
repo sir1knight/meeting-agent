@@ -622,10 +622,10 @@ def _giga_error(r: requests.Response) -> str:
     return (r.text or "").strip()[:200] or str(r.status_code)
 
 
-def chat_gigachat(cfg: dict, user: str, system: str = SYSTEM) -> str:
+def chat_gigachat(cfg: dict, user: str, system: str = SYSTEM, model: str | None = None) -> str:
     """Запрос к GigaChat API (Сбер). Работает в РФ без VPN; текст расшифровки уходит в облако Сбера."""
     token = _gigachat_access_token(cfg)
-    wanted = cfg.get("gigachat", {}).get("model") or "GigaChat-2"
+    wanted = model or cfg.get("gigachat", {}).get("model") or "GigaChat-2"
 
     def call(tok: str, m: str) -> requests.Response:
         headers = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "application/json"}
@@ -695,6 +695,40 @@ def _check_gigachat(cfg: dict) -> dict:
             return {"ok": True, "message": f"Токен получен; доступные модели: {', '.join(ids[:4])}"}
         return {"ok": True, "message": f"Ключ работает, токен OAuth получен, модель {model} доступна"}
     return {"ok": False, "message": f"Токен получен, но список моделей вернул {r.status_code}: {_giga_error(r)}"}
+
+
+_GIGACHAT_TITLES = {
+    "GigaChat-2": "GigaChat 2 Lite — быстрая, бесплатные токены",
+    "GigaChat-2-Pro": "GigaChat 2 Pro — сбалансированная",
+    "GigaChat-2-Max": "GigaChat 2 Max — максимальная точность",
+    "GigaChat": "GigaChat Lite (1.0)",
+    "GigaChat-Pro": "GigaChat Pro (1.0)",
+    "GigaChat-Max": "GigaChat Max (1.0)",
+}
+
+
+def gigachat_models(cfg: dict) -> list[dict]:
+    """Список текстовых моделей GigaChat, доступных по сохранённому ключу."""
+    if not gigachat_key(cfg):
+        return []
+    token = _gigachat_access_token(cfg)
+    r = _giga_http("GET", f"{GIGACHAT_API}/models",
+                   headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=20)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Не удалось получить список моделей GigaChat ({r.status_code}): {_giga_error(r)}")
+    raw_ids = []
+    for m in r.json().get("data", []):
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        mid = str(m["id"])
+        mtype = str(m.get("type") or "chat").lower()
+        if mtype != "chat" or "embed" in mid.lower() or mid.endswith("-preview"):
+            continue
+        if mid not in raw_ids:
+            raw_ids.append(mid)
+    order = ["GigaChat-2", "GigaChat-2-Pro", "GigaChat-2-Max", "GigaChat", "GigaChat-Pro", "GigaChat-Max"]
+    raw_ids.sort(key=lambda x: (order.index(x) if x in order else len(order), x))
+    return [{"id": x, "title": _GIGACHAT_TITLES.get(x, x)} for x in raw_ids]
 
 
 def _api_error(r: requests.Response) -> str:

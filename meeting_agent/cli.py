@@ -27,6 +27,7 @@ def main() -> None:  # pipeline импортируется по месту: boot
     pr.add_argument("--template", default=None)
     pr.add_argument("--llm", choices=["local", "claude-code", "claude", "gemini", "openai", "gigachat"], help="кто пишет протокол")
     pr.add_argument("--gemini-model", default=None, help="разовая модель Gemini для этого протокола")
+    pr.add_argument("--model-override", default=None, help="разовая модель выбранного облачного сервиса")
     pr.add_argument("--asr", choices=["whisper-turbo", "whisper-large", "gigaam"],
                     help="чем распознавать речь (по умолчанию — из настроек)")
     pr.add_argument("--retranscribe", action="store_true",
@@ -61,6 +62,8 @@ def main() -> None:  # pipeline импортируется по месту: boot
         cfg["llm"]["backend"] = args.llm
     if getattr(args, "gemini_model", None):
         cfg.setdefault("gemini", {})["model"] = args.gemini_model
+    if getattr(args, "model_override", None) and cfg["llm"].get("backend") in ("gemini", "gigachat", "openai", "claude"):
+        cfg.setdefault(cfg["llm"]["backend"], {})["model"] = args.model_override
     if getattr(args, "asr", None):
         cfg["whisper"]["engine"] = args.asr
 

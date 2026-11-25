@@ -46,14 +46,16 @@ class Jobs:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def add(self, folder: Path, template: str | None = None, llm: str | None = None,
-            retranscribe: bool = False, asr: str | None = None, gemini_model: str | None = None) -> dict:
+            retranscribe: bool = False, asr: str | None = None, gemini_model: str | None = None,
+            model_override: str | None = None) -> dict:
         folder = folder.resolve()
         with self.lock:
             for j in self.items:  # одну и ту же встречу дважды в очередь не ставим
                 if j["folder"] == str(folder) and j["status"] in ("queued", "running"):
                     return j
             job = {"id": uuid.uuid4().hex[:8], "folder": str(folder), "template": template,
-                   "llm": llm, "gemini_model": gemini_model, "retranscribe": retranscribe, "asr": asr,
+                   "llm": llm, "gemini_model": gemini_model, "model_override": model_override,
+                   "retranscribe": retranscribe, "asr": asr,
                    "status": "queued", "stage": None, "error": None, "note": None, "added": time.time()}
             self.items.append(job)
             self.items = [j for j in self.items if j["status"] != "done" or time.time() - j["added"] < 3600]
@@ -92,6 +94,8 @@ class Jobs:
             cmd += ["--llm", job["llm"]]
         if job.get("gemini_model"):
             cmd += ["--gemini-model", job["gemini_model"]]
+        if job.get("model_override"):
+            cmd += ["--model-override", job["model_override"]]
         if job["retranscribe"]:
             cmd += ["--retranscribe"]
             if job.get("asr"):
@@ -294,6 +298,7 @@ def get_settings(cfg: dict) -> dict:
         "names_guess": cfg["names"].get("guess", True),
         "live_enabled": cfg.get("live", {}).get("enabled", True),
         "ask_backend": ask_mod.backend(cfg),
+        "ask_backend_raw": cfg.get("ask", {}).get("backend", ""),
         "ask_backends": ask_mod.BACKENDS,
         "gemini_key_set": bool(config.read_secret("gemini_key")),
         "template_backend": _template_backend(cfg),
@@ -349,7 +354,7 @@ def save_settings(data: dict) -> None:
     if data.get("llm_backend") in BACKENDS:
         put("llm", "backend", data["llm_backend"])
     from .ask import BACKENDS as ASK_BACKENDS
-    if data.get("ask_backend") in ASK_BACKENDS:
+    if data.get("ask_backend") == "" or data.get("ask_backend") in ASK_BACKENDS:
         put("ask", "backend", data["ask_backend"])
     if data.get("asr_engine") in models.ASR_ENGINES:
         put("whisper", "engine", data["asr_engine"])
@@ -588,10 +593,16 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- API ---
     def api_get_status(self, q):
+        from . import live as live_mod
+
         cfg = config.load()
         downloads = self.state.downloads.status(cfg)
+        rec = dict(self.state.recording)
+        if rec.get("state") == "recording" and rec.get("folder") and Path(rec["folder"]).is_dir():
+            rec["live_count"] = live_mod.count_segments(Path(rec["folder"]))
+            rec["live_enabled"] = live_mod.allowed(cfg)[0]
         self._json({
-            "recording": self.state.recording,
+            "recording": rec,
             "jobs": self.state.jobs.snapshot(),
             "models": downloads,
             # Разделение собеседников — по желанию, без него приложение работает.
@@ -600,6 +611,14 @@ class Handler(BaseHTTPRequestHandler):
             "llm_backend": cfg["llm"].get("backend", "local"),
             "permissions": self.state.permissions,
         })
+
+    def api_get_live(self, q):
+        from . import live as live_mod
+
+        rec = self.state.recording
+        if rec.get("state") != "recording" or not rec.get("folder") or not Path(rec["folder"]).is_dir():
+            return self._json({"active": False})
+        self._json(live_mod.snapshot(Path(rec["folder"]), config.load()))
 
     def api_get_meetings(self, q):
         self._json(list_meetings(config.load()))
@@ -627,10 +646,11 @@ class Handler(BaseHTTPRequestHandler):
         llm = data.get("llm") if data.get("llm") in BACKENDS else None
         asr = data.get("asr") if data.get("asr") in models.ASR_ENGINES else None
         gmodel = _gemini_model(str(data["gemini_model"])) if data.get("gemini_model") else None
+        m_override = str(data["model"]).strip()[:80] if isinstance(data.get("model"), str) and data["model"].strip() else None
         if asr and data.get("retranscribe") and not models.engine_ready(cfg, asr):
             raise ValueError("Эта модель распознавания ещё не скачана: Настройки → Распознавание речи")
         job = self.state.jobs.add(Path(info["source"]), data.get("template"), llm,
-                                  bool(data.get("retranscribe")), asr, gemini_model=gmodel)
+                                  bool(data.get("retranscribe")), asr, gemini_model=gmodel, model_override=m_override)
         self._json(job)
 
     def api_post_reveal(self, q):
@@ -1067,6 +1087,11 @@ class Handler(BaseHTTPRequestHandler):
         from .summarize import gemini_models
 
         self._json(gemini_models())
+
+    def api_get_gigachat_models(self, q):
+        from .summarize import gigachat_models
+
+        self._json(gigachat_models(config.load()))
 
     def api_post_check_hf(self, q):
         self._json(check_hf(config.load()))
