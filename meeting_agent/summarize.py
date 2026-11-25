@@ -5,6 +5,7 @@
 облачные модели получают расшифровку целиком.
 """
 
+import base64
 import json
 import logging
 import os
@@ -13,11 +14,12 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 
 import requests
 
 from . import config
-from .config import anthropic_key, openai_key
+from .config import anthropic_key, gigachat_key, openai_key
 from .osutil import IS_WIN
 
 log = logging.getLogger(__name__)
@@ -77,11 +79,13 @@ def chat(cfg: dict, user: str, system: str = SYSTEM) -> str:
         return chat_gemini(cfg, user, system)
     if backend == "openai":
         return chat_openai(cfg, user, system)
+    if backend == "gigachat":
+        return chat_gigachat(cfg, user, system)
     return chat_local(cfg, user, system)
 
 
-# У облачных моделей контекст от 400 тыс. токенов: любая встреча помещается целиком.
-CLOUD = ("claude", "claude-code", "gemini", "openai")
+# У облачных моделей контекст от 128–400 тыс. токенов: любая встреча помещается целиком.
+CLOUD = ("claude", "claude-code", "gemini", "openai", "gigachat")
 
 
 def chunk_size(cfg: dict) -> int:
@@ -270,7 +274,11 @@ def chat_gemini(cfg: dict, user: str, system: str = SYSTEM, model: str | None = 
                 "или подключите оплату в Google AI Studio.")
         raise RuntimeError(f"Исчерпан лимит Gemini API для модели {model}. {hint} Ответ Google: {_api_error(r)[:200]}")
     if r.status_code in (400, 401, 403):
-        raise RuntimeError(f"Gemini API отказал: {_api_error(r)}")
+        err = _api_error(r)
+        if "location is not supported" in err.lower():
+            raise RuntimeError("Gemini API недоступен в вашем регионе — включите VPN или составьте протокол "
+                               f"на локальной модели Qwen ({err})")
+        raise RuntimeError(f"Gemini API отказал: {err}")
     if r.status_code >= 400:
         raise RuntimeError(f"Gemini API ответил ошибкой {r.status_code}: {_api_error(r)[:200]}")
     if model != wanted and model in GEMINI_FREE:
@@ -303,7 +311,11 @@ def gemini_models() -> list[dict]:
     except requests.RequestException as e:
         raise RuntimeError("Нет связи с Gemini API: проверьте интернет") from e
     if r.status_code in (400, 401, 403):
-        raise RuntimeError(f"Gemini API отказал: {_api_error(r)}")
+        err = _api_error(r)
+        if "location is not supported" in err.lower():
+            raise RuntimeError("Gemini API недоступен в вашем регионе — включите VPN или составьте протокол "
+                               f"на локальной модели Qwen ({err})")
+        raise RuntimeError(f"Gemini API отказал: {err}")
     if r.status_code >= 400:
         raise RuntimeError(f"Не удалось получить список моделей Gemini (ответ Google {r.status_code}) — "
                            "попробуйте через пару минут")
@@ -342,6 +354,8 @@ def check_key(service: str, cfg: dict, full: bool = False) -> dict:
             return _check_openai(cfg)
         if service == "claude":
             return _check_claude(cfg)
+        if service == "gigachat":
+            return _check_gigachat(cfg)
     except requests.RequestException as e:
         log.warning("Проверка ключа %s: нет связи (%s)", service, e)
         return {"ok": False, "message": "Нет связи с сервисом после трёх попыток: проверьте интернет "
@@ -516,6 +530,171 @@ def _pick_openai_model(headers: dict) -> str:
     if not good:
         raise RuntimeError("OpenAI API не предлагает подходящих моделей")
     return max(good, key=lambda i: [float(x) for x in re.findall(r"\d+(?:\.\d+)?", i)])
+
+
+GIGACHAT_OAUTH = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+GIGACHAT_API = "https://gigachat.devices.sberbank.ru/api/v1"
+GIGACHAT_SCOPES = ("GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP")
+GIGACHAT_MODELS = ("GigaChat-2", "GigaChat-2-Pro", "GigaChat-2-Max", "GigaChat", "GigaChat-Pro", "GigaChat-Max")
+_giga_token_cache: dict = {"token": "", "expires": 0.0, "key": "", "scope": ""}
+
+
+def _norm_giga_key(raw: str) -> str:
+    val = re.sub(r"^\s*Basic\s+", "", raw.strip(), flags=re.I).strip()
+    if ":" in val:  # если вставили client_id:client_secret вместо готового Base64-ключа
+        val = base64.b64encode(val.encode("utf-8")).decode("ascii")
+    return re.sub(r"\s+", "", val)
+
+
+def _giga_http(method: str, url: str, **kw) -> requests.Response:
+    """Шлюзы Сбера (*.devices.sberbank.ru) используют корневой сертификат Минцифры РФ, которого нет
+    в стандартном бандле certifi. Сначала пробуем со стандартной проверкой, а при SSLError повторяем
+    с verify=False, чтобы GigaChat работал из коробки на любом Mac и Windows."""
+    try:
+        return _http(method, url, **kw)
+    except requests.exceptions.SSLError:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        kw["verify"] = False
+        return _http(method, url, **kw)
+
+
+def _gigachat_access_token(cfg: dict, force: bool = False) -> str:
+    raw = gigachat_key(cfg)
+    if not raw:
+        raise RuntimeError("Не задан ключ авторизации GigaChat API: создайте его в Studio "
+                           "(developers.sber.ru/studio) и сохраните в Настройках → Протоколы и ИИ")
+    key = _norm_giga_key(raw)
+    wanted_scope = cfg.get("gigachat", {}).get("scope") or "GIGACHAT_API_PERS"
+    if wanted_scope not in GIGACHAT_SCOPES:
+        wanted_scope = "GIGACHAT_API_PERS"
+    now = time.time()
+    if (not force and _giga_token_cache["token"] and _giga_token_cache["key"] == key
+            and _giga_token_cache["scope"] == wanted_scope and now < _giga_token_cache["expires"] - 60):
+        return _giga_token_cache["token"]
+
+    scopes = [wanted_scope] + [s for s in GIGACHAT_SCOPES if s != wanted_scope]
+    last_r: requests.Response | None = None
+    for sc in scopes:
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "RqUID": str(uuid.uuid4()),
+            "Authorization": f"Basic {key}",
+        }
+        try:
+            r = _giga_http("POST", GIGACHAT_OAUTH, headers=headers, data={"scope": sc}, timeout=30)
+        except requests.RequestException as e:
+            raise RuntimeError("Нет связи с сервером авторизации GigaChat (ngw.devices.sberbank.ru:9443): "
+                               "проверьте интернет или отключите зарубежный VPN") from e
+        last_r = r
+        if r.status_code == 200:
+            data = r.json()
+            tok = data.get("access_token") or ""
+            exp = float(data.get("expires_at") or 0)
+            if exp > 1e11:  # миллисекунды → секунды
+                exp /= 1000.0
+            if not exp or exp <= now:
+                exp = now + 1700
+            _giga_token_cache.update(token=tok, expires=exp, key=key, scope=wanted_scope)
+            return tok
+        # Если ошибка именно из-за несовпадения версии API (физлицо / B2B / CORP) — пробуем следующий scope.
+        body_low = r.text.lower()
+        if r.status_code in (400, 401, 403) and ("scope" in body_low or "client" in body_low):
+            continue
+        break
+
+    err = _giga_error(last_r) if last_r is not None else "нет ответа"
+    if last_r is not None and last_r.status_code in (400, 401, 403):
+        raise RuntimeError(f"GigaChat не принял ключ авторизации ({err}). Проверьте ключ и тип доступа "
+                           "(физлицо / юрлицо) в Studio developers.sber.ru")
+    raise RuntimeError(f"Не удалось получить токен GigaChat API: {err}")
+
+
+def _giga_error(r: requests.Response) -> str:
+    try:
+        d = r.json()
+        if isinstance(d, dict):
+            return str(d.get("message") or d.get("error_description") or (d.get("error") or {}).get("message")
+                       or d.get("error") or r.status_code)
+    except ValueError:
+        pass
+    return (r.text or "").strip()[:200] or str(r.status_code)
+
+
+def chat_gigachat(cfg: dict, user: str, system: str = SYSTEM) -> str:
+    """Запрос к GigaChat API (Сбер). Работает в РФ без VPN; текст расшифровки уходит в облако Сбера."""
+    token = _gigachat_access_token(cfg)
+    wanted = cfg.get("gigachat", {}).get("model") or "GigaChat-2"
+
+    def call(tok: str, m: str) -> requests.Response:
+        headers = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json", "Accept": "application/json"}
+        body = {"model": m, "temperature": 0.2,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        return _giga_http("POST", f"{GIGACHAT_API}/chat/completions", headers=headers, json=body, timeout=900)
+
+    model = wanted
+    try:
+        r = call(token, model)
+        if r.status_code == 401:  # токен истёк раньше срока — обновляем один раз
+            token = _gigachat_access_token(cfg, force=True)
+            r = call(token, model)
+        if r.status_code in (402, 404):  # для выбранной модели (например Max/Pro) нет пакета — пробуем базовую
+            for fallback in ("GigaChat-2", "GigaChat", "GigaChat-2-Pro", "GigaChat-2-Max"):
+                if fallback == model:
+                    continue
+                r2 = call(token, fallback)
+                if r2.status_code == 200:
+                    log.info("GigaChat: ответила %s вместо %s", fallback, model)
+                    r, model = r2, fallback
+                    break
+        for wait in (4, 12):
+            if r.status_code not in GEMINI_BUSY:
+                break
+            log.warning("GigaChat ответил %s, повтор через %d с…", r.status_code, wait)
+            time.sleep(wait)
+            r = call(token, model)
+    except requests.RequestException as e:
+        raise RuntimeError("Нет связи с GigaChat API: проверьте интернет (или отключите зарубежный VPN)") from e
+
+    if r.status_code == 402:
+        raise RuntimeError(f"Исчерпаны токены GigaChat API для модели {model} — проверьте остаток токенов "
+                           "в Studio (developers.sber.ru/studio) или выберите модель GigaChat-2 (Lite)")
+    if r.status_code == 429:
+        raise RuntimeError("Превышен лимит одновременных запросов GigaChat API — попробуйте через минуту")
+    if r.status_code in (401, 403):
+        raise RuntimeError(f"GigaChat API отказал в доступе: {_giga_error(r)}")
+    if r.status_code in GEMINI_BUSY:
+        raise RuntimeError(f"GigaChat API сейчас перегружен (ответ {r.status_code}) — попробуйте через пару минут")
+    if r.status_code >= 400:
+        raise RuntimeError(f"GigaChat API ответил ошибкой {r.status_code}: {_giga_error(r)[:200]}")
+
+    try:
+        choice = r.json()["choices"][0]
+    except (KeyError, IndexError, ValueError):
+        raise RuntimeError("GigaChat API вернул пустой ответ")
+    if choice.get("finish_reason") == "length":
+        log.warning("Ответ GigaChat обрезан по длине")
+    return (choice.get("message", {}).get("content") or "").strip()
+
+
+def _check_gigachat(cfg: dict) -> dict:
+    raw = gigachat_key(cfg)
+    if not raw:
+        return {"ok": False, "message": "Ключ не сохранён"}
+    try:
+        token = _gigachat_access_token(cfg, force=True)
+    except RuntimeError as e:
+        return {"ok": False, "message": str(e)}
+    model = cfg.get("gigachat", {}).get("model") or "GigaChat-2"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    r = _giga_http("GET", f"{GIGACHAT_API}/models", headers=headers, timeout=20)
+    if r.status_code == 200:
+        ids = [m.get("id") for m in r.json().get("data", []) if isinstance(m, dict) and m.get("id")]
+        if ids and model not in ids:
+            return {"ok": True, "message": f"Токен получен; доступные модели: {', '.join(ids[:4])}"}
+        return {"ok": True, "message": f"Ключ работает, токен OAuth получен, модель {model} доступна"}
+    return {"ok": False, "message": f"Токен получен, но список моделей вернул {r.status_code}: {_giga_error(r)}"}
 
 
 def _api_error(r: requests.Response) -> str:

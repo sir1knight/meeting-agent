@@ -88,6 +88,8 @@ def process(path: Path, cfg: dict, template: str | None = None, retranscribe: bo
                 log.warning("Не удалось пересчитать слепки голоса: %s", e)
             finally:
                 oth16.unlink(missing_ok=True)
+        elif (work / voices.SPEAKERS_FILE).exists():
+            voices.rematch(cfg, work)
         segments = voices.apply_names(segments, work)
     else:
         segments, total = _transcribe_all(work, mic, others, meta, cfg)

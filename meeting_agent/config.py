@@ -13,7 +13,7 @@ HOME = Path(os.environ.get("MEETING_AGENT_HOME") or ROOT)
 SETTINGS_FILE = HOME / "settings.json"
 MODELS_DIR = HOME / "models"
 SECRET_FILES = {"hf_token": ".hf_token", "anthropic_key": ".anthropic_key", "gemini_key": ".gemini_key",
-                "openai_key": ".openai_key"}
+                "openai_key": ".openai_key", "gigachat_key": ".gigachat_key"}
 
 DEFAULTS = {
     "paths": {"recordings": "~/MeetingAgent/recordings", "notes": "~/MeetingAgent/notes",
@@ -69,6 +69,7 @@ DEFAULTS = {
     "claude": {"code_model": "", "model": "claude-opus-5-5", "effort": "medium", "api_key": ""},
     "gemini": {"model": "gemini-3.8-flash"},
     "openai": {"model": "gpt-5", "api_key": ""},
+    "gigachat": {"model": "GigaChat-2", "scope": "GIGACHAT_API_PERS", "api_key": ""},
     "output": {"template": "meeting", "keep_audio": True, "compress_audio": True, "notify": True},
 }
 
@@ -144,3 +145,8 @@ def anthropic_key(cfg: dict) -> str | None:
 def openai_key(cfg: dict) -> str | None:
     return (cfg.get("openai", {}).get("api_key") or os.environ.get("OPENAI_API_KEY")
             or read_secret("openai_key"))
+
+
+def gigachat_key(cfg: dict) -> str | None:
+    return (cfg.get("gigachat", {}).get("api_key") or os.environ.get("GIGACHAT_CREDENTIALS")
+            or os.environ.get("GIGACHAT_API_KEY") or read_secret("gigachat_key"))

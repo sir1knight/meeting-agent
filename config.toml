@@ -51,7 +51,7 @@ max_embeddings = 20          # сколько встреч помнить в о�
 participant_bonus = 0.10     # люди из списка участников встречи узнаются при пороге ниже на столько
 
 [ask]
-# Умный поиск (вопросы по встречам): "claude-code", "claude", "gemini", "openai", "local" или "" — как у протоколов.
+# Умный поиск (вопросы по встречам): "claude-code", "claude", "gemini", "openai", "gigachat", "local" или "" — как у протоколов.
 # В облачных вариантах в облако уходят найденные фрагменты встреч.
 backend = ""
 gemini_model = "gemini-3.8-flash"   # если модель устареет, приложение само возьмёт актуальную «flash»
@@ -71,8 +71,9 @@ guess = true
 #   "claude-code" — Claude Code по подписке Claude (без доплаты, тратит лимиты подписки);
 #   "claude"      — Claude API по платному ключу;
 #   "gemini"      — Gemini API по ключу (файл .gemini_key, вводится в окне приложения);
-#   "openai"      — ChatGPT через OpenAI API по ключу (файл .openai_key или OPENAI_API_KEY).
-# Во всех облачных вариантах ТЕКСТ РАСШИФРОВКИ ОТПРАВЛЯЕТСЯ В ОБЛАКО (Anthropic, Google или OpenAI).
+#   "openai"      — ChatGPT через OpenAI API по ключу (файл .openai_key или OPENAI_API_KEY);
+#   "gigachat"    — GigaChat API (Сбер) по ключу авторизации (файл .gigachat_key или GIGACHAT_CREDENTIALS).
+# Во всех облачных вариантах ТЕКСТ РАСШИФРОВКИ ОТПРАВЛЯЕТСЯ В ОБЛАКО (Anthropic, Google, OpenAI или Сбер).
 # Звук в любом случае расшифровывается локально.
 backend = "local"
 # Модель MLX с Hugging Face (скачивается один раз через setup.sh, дальше работает офлайн).
@@ -97,3 +98,7 @@ model = "gemini-3.8-flash"   # для протоколов. Бесплатно: 
 
 [openai]
 model = "gpt-5"              # если модель устареет, приложение само возьмёт актуальную
+
+[gigachat]
+model = "GigaChat-2"         # GigaChat-2 (Lite), GigaChat-2-Pro или GigaChat-2-Max
+scope = "GIGACHAT_API_PERS"  # GIGACHAT_API_PERS (физлица), GIGACHAT_API_B2B (юрлица, пакеты) или GIGACHAT_API_CORP (pay-as-you-go)

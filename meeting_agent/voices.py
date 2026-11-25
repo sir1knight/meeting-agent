@@ -40,6 +40,77 @@ def _norm(name: str) -> str:
     return re.sub(r"\s+", " ", name.strip()).casefold().replace("ё", "е")
 
 
+# Уменьшительные и полные формы русских имён — чтобы «Саша» в списке участников находил слепок «Александр Нестеров»,
+# а «Надя В» (без точки) — слепок «Надя В.». Имена «Илья» и «Ильяс» намеренно разные.
+_CANON_NAMES = {
+    "александр": "александр", "саша": "александр", "саня": "александр", "шура": "александр", "алекс": "александр",
+    "алексей": "алексей", "леша": "алексей",
+    "дмитрий": "дмитрий", "дима": "дмитрий", "митя": "дмитрий",
+    "надежда": "надежда", "надя": "надежда",
+    "ирина": "ирина", "ира": "ирина",
+    "ольга": "ольга", "оля": "ольга",
+    "николай": "николай", "коля": "николай",
+    "татьяна": "татьяна", "таня": "татьяна",
+    "юлия": "юлия", "юля": "юля",
+    "антонина": "антонина", "тоня": "антонина",
+    "анатолий": "анатолий", "толя": "анатолий",
+    "владимир": "владимир", "вова": "владимир", "володя": "владимир",
+    "владислав": "владислав", "влад": "владислав",
+    "максим": "максим", "макс": "максим",
+    "анна": "анна", "аня": "анна", "анюта": "анна",
+    "сергей": "сергей", "сережа": "сергей",
+    "михаил": "михаил", "миша": "михаил",
+    "маргарита": "маргарита", "рита": "маргарита",
+    "лидия": "лидия", "лида": "лидия",
+    "елена": "елена", "лена": "елена",
+    "наталья": "наталья", "наталия": "наталья", "наташа": "наталья",
+    "мария": "мария", "маша": "мария",
+    "екатерина": "екатерина", "катя": "екатерина",
+    "евгений": "евгений", "евгения": "евгений", "женя": "евгений",
+    "павел": "павел", "паша": "павел",
+    "валентин": "валентин", "валентина": "валентин", "валя": "валентин",
+    "виктория": "виктория", "вика": "виктория",
+    "анастасия": "анастасия", "настя": "анастасия",
+    "артем": "артем", "тема": "артем",
+    "иван": "иван", "ваня": "иван",
+    "петр": "петр", "петя": "петр",
+    "константин": "константин", "костя": "константин",
+    "станислав": "станислав", "стас": "станислав",
+    "вячеслав": "вячеслав", "слава": "вячеслав",
+    "роман": "роман", "рома": "роман",
+    "дарья": "дарья", "даша": "дарья",
+    "софия": "софия", "софья": "софия", "соня": "софия",
+    "ксения": "ксения", "ксенья": "ксения", "ксюша": "ксения",
+    "светлана": "светлана", "света": "светлана",
+    "людмила": "людмила", "люда": "людмила",
+    "галина": "галина", "галя": "галина",
+    "любовь": "любовь", "люба": "любовь",
+    "валерий": "валерий", "валерия": "валерий", "валера": "валерий",
+}
+
+
+def _name_tokens(name: str) -> list[str]:
+    raw = re.findall(r"[a-zа-я0-9]+", name.casefold().replace("ё", "е"))
+    return [_CANON_NAMES.get(w, w) for w in raw]
+
+
+def same_person_name(a: str, b: str) -> int:
+    """Степень совпадения двух записей имени: 2 — полное (с учётом точек и инициала фамилии),
+    1 — одно является частью другого («Иван» ↔ «Иван Митрохин», «Нина» ↔ «Нина Р.»), 0 — разные люди."""
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if not ta or not tb:
+        return 0
+    sa, sb = set(ta), set(tb)
+    if sa == sb:
+        return 2
+    if len(ta) == 2 and len(tb) == 2 and ta[0] == tb[0]:
+        if (len(ta[1]) == 1 and tb[1].startswith(ta[1])) or (len(tb[1]) == 1 and ta[1].startswith(tb[1])):
+            return 2
+    if sa < sb or sb < sa:
+        return 1
+    return 0
+
+
 def load_profiles(cfg: dict) -> list[dict]:
     root = voices_dir(cfg)
     out = []
@@ -142,47 +213,70 @@ def score(profile: dict, vector: list[float], method: str = "max", exclude_meeti
     return max(_cos(v, vector) for v in vecs)
 
 
-def match(speakers: dict[str, dict], cfg: dict, meeting: str) -> dict[str, dict]:
-    """{метка: {voice_id, name, score, uncertain}} — жадно по убыванию сходства,
-    один слепок — не больше одного собеседника встречи."""
+def match(speakers: dict[str, dict], cfg: dict, meeting: str,
+          taken_voices: set[str] | None = None) -> dict[str, dict]:
+    """{метка: {voice_id, name, score, uncertain}} — жадно по убыванию сходства.
+    Если задан список участников встречи — максимально ищет их голоса по слепкам."""
     v = cfg["voices"]
     hi, lo = float(v["match_threshold"]), float(v["uncertain_threshold"])
     min_speech = float(v.get("min_speech_seconds", 10))
-    bonus = float(v.get("participant_bonus", 0.10))
+    bonus = max(float(v.get("participant_bonus", 0.15)), 0.15)
+    listed_floor = float(v.get("listed_min_threshold", 0.34))
     from .participants import of
-    listed = {_norm(n) for n in of(cfg) if _norm(n)}
-    listed_tokens = {frozenset(n.split()) for n in listed if n}
+    listed_raw = [n for n in of(cfg) if _norm(n)]
+    has_list = bool(listed_raw)
 
     def in_listed(name: str) -> bool:
-        n = _norm(name)
-        if not n:
-            return False
-        if n in listed:
-            return True
-        toks = frozenset(n.split())
-        return bool(toks) and any(toks == lt for lt in listed_tokens)
+        return any(same_person_name(name, ln) > 0 for ln in listed_raw)
 
     profiles = [p for p in load_profiles(cfg) if p.get("embeddings")]
-    pairs = []
+    on_list_ids = {p["id"] for p in profiles if in_listed(p.get("name", ""))}
+    all_scores: dict[tuple[str, str], float] = {}
+    top_by_label: dict[str, list[tuple[float, str]]] = {}
+
     for label, sp in speakers.items():
         if not sp.get("embedding"):
             continue
-        dur = speakers[label].get("duration", 0)
+        row = []
         for p in profiles:
             s = score(p, sp["embedding"], v.get("method", "max"), exclude_meeting=meeting)
-            on_list = in_listed(p.get("name", ""))
+            all_scores[(label, p["id"])] = s
+            row.append((s, p["id"]))
+        row.sort(reverse=True)
+        top_by_label[label] = row
+
+    pairs = []
+    fallback_listed = []
+    for label, sp in speakers.items():
+        if not sp.get("embedding"):
+            continue
+        dur = sp.get("duration", 0)
+        row = top_by_label.get(label, [])
+        best_any = row[0][0] if row else -1.0
+        top5_ids = {pid for _, pid in row[:5]}
+        for p in profiles:
+            s = all_scores[(label, p["id"])]
+            on_list = p["id"] in on_list_ids
             # Если задан список участников: посторонних не подставляем в «серой зоне» (с «?»),
             # чтобы на встречу не попадали имена отсутствующих коллег; для них требуется уверенное совпадение.
-            if listed and not on_list:
+            if has_list and not on_list:
                 if s >= hi and dur >= min_speech:
                     pairs.append((s, s, label, p))
                 continue
-            # Человек есть в списке участников — ему порог ниже на bonus.
+            # В серой зоне (s < lo) требуем, чтобы слепок входил в топ-5 ближайших голосов этого спикера
+            # и не отставал от лучшего голоса более чем на 0.15 (защита от ложного совпадения чужого пола).
+            if s < lo and (p["id"] not in top5_ids or best_any - s > 0.15):
+                continue
             b = bonus if on_list else 0.0
             if s + b >= lo:
                 pairs.append((s + b, s, label, p))
+            elif on_list and s >= listed_floor:
+                fallback_listed.append((s, label, p))
+
     pairs.sort(key=lambda x: x[0], reverse=True)
-    used_labels, used_voices, out = set(), set(), {}
+    used_labels: set[str] = set()
+    used_voices: set[str] = set(taken_voices or ())
+    out: dict[str, dict] = {}
     for eff, s, label, p in pairs:
         if label in used_labels or p["id"] in used_voices:
             continue
@@ -192,6 +286,39 @@ def match(speakers: dict[str, dict], cfg: dict, meeting: str) -> dict[str, dict]
         sure = eff >= hi and speakers[label].get("duration", 0) >= min_speech
         out[label] = {"voice_id": p["id"], "name": p.get("name", ""), "score": round(s, 3),
                       "uncertain": not sure}
+
+    # Проход 2: для участников из списка, кому ещё не достался голос, ищем лучший свободный кластер до listed_floor.
+    fallback_listed.sort(key=lambda x: x[0], reverse=True)
+    for s, label, p in fallback_listed:
+        if label in used_labels or p["id"] in used_voices:
+            continue
+        used_labels.add(label)
+        used_voices.add(p["id"])
+        out[label] = {"voice_id": p["id"], "name": p.get("name", ""), "score": round(s, 3),
+                      "uncertain": True}
+
+    # Проход 3: если pyannote разбил одного человека на несколько кластеров (SPEAKER_XX),
+    # и у оставшегося безымянного кластера явно тот же голос, что уже найден на встрече.
+    for label, sp in speakers.items():
+        if label in used_labels or not sp.get("embedding"):
+            continue
+        ranked = sorted(((all_scores.get((label, p["id"]), -1.0), p) for p in profiles),
+                        key=lambda x: x[0], reverse=True)
+        if not ranked:
+            continue
+        best_s, best_p = ranked[0]
+        second_s = ranked[1][0] if len(ranked) > 1 else -1.0
+        if best_p["id"] not in used_voices:
+            continue
+        on_list = best_p["id"] in on_list_ids
+        dur = sp.get("duration", 0)
+        if has_list and not on_list and dur < min_speech:
+            continue
+        if best_s >= hi or (on_list and best_s >= 0.68 and best_s - second_s >= 0.15):
+            sure = (best_s + (bonus if on_list else 0.0)) >= hi and dur >= min_speech
+            out[label] = {"voice_id": best_p["id"], "name": best_p.get("name", ""), "score": round(best_s, 3),
+                          "uncertain": not sure}
+            used_labels.add(label)
     return out
 
 
@@ -233,11 +360,13 @@ def identify(work: Path, speakers, base_names: dict[str, str], cfg: dict) -> dic
             if old.get("voice_id") and old.get("auto"):
                 remove_embedding(cfg, old["voice_id"], work.name)
         found = match(data["speakers"], cfg, work.name)
-        for label, m in found.items():
+        added_voices: set[str] = set()
+        for label, m in sorted(found.items(), key=lambda kv: data["speakers"][kv[0]].get("duration", 0), reverse=True):
             sp = data["speakers"][label]
             sp.update(voice_id=m["voice_id"], name=m["name"], score=m["score"],
                       uncertain=m["uncertain"], auto=True)
-            if not m["uncertain"]:  # уверенно узнали — слепок пополняется этой встречей
+            if not m["uncertain"] and m["voice_id"] not in added_voices:  # уверенно узнали — слепок пополняется этой встречей
+                added_voices.add(m["voice_id"])
                 p = get_profile(cfg, m["voice_id"])
                 add_embedding(cfg, p, work.name, label, sp["embedding"], sp["duration"], auto=True)
             log.info("Узнал голос: %s → %s (%.2f%s)", sp["base"], m["name"], m["score"],
@@ -248,6 +377,79 @@ def identify(work: Path, speakers, base_names: dict[str, str], cfg: dict) -> dic
                 data["speakers"][label].update(name=old.get("name"), manual=True)
     write_speakers(work, data)
     return data
+
+
+def rematch(cfg: dict, work: Path, note: Path | None = None) -> bool:
+    """Пересопоставить сохранённые в speakers.json эмбеддинги со слепками голосов (например, когда
+    пользователь добавил или изменил список участников уже обработанной встречи) без повторной расшифровки."""
+    if not cfg["voices"].get("enabled", True):
+        return False
+    data = read_speakers(work)
+    sps = data.get("speakers", {})
+    if not sps:
+        return False
+    from . import participants
+    cfg.setdefault("meeting", {})["participants"] = participants.read(work)
+
+    before = {label: display_name(sp) for label, sp in sps.items()}
+    taken_voices: set[str] = set()
+    candidates: dict[str, dict] = {}
+    raw_text = ""
+    if (work / SEGMENTS_FILE).exists():
+        try:
+            raw_text = "\n".join(s.get("text", "") for s in _read_segments(work).get("segments", []))
+        except LookupError:
+            pass
+    from . import names as _names
+    for label, sp in sps.items():
+        # Ручные переименования пользователя (с запоминанием голоса или без) не перезаписываем.
+        if sp.get("manual") or (sp.get("voice_id") and not sp.get("auto")):
+            if sp.get("voice_id"):
+                taken_voices.add(sp["voice_id"])
+            continue
+        if sp.get("voice_id") and sp.get("auto"):
+            remove_embedding(cfg, sp["voice_id"], work.name)
+        for k in ("name", "voice_id", "score", "uncertain", "auto"):
+            sp.pop(k, None)
+        if sp.get("guess") and raw_text:
+            if (not _names._evidence_in_chunk(sp.get("guess_evidence", ""), raw_text)
+                    or not _names._heard(sp["guess"], raw_text)):
+                sp.pop("guess", None)
+                sp.pop("guess_evidence", None)
+        if sp.get("embedding"):
+            candidates[label] = sp
+
+    if candidates:
+        found = match(candidates, cfg, work.name, taken_voices=taken_voices)
+        added_voices = set(taken_voices)
+        for label, m in sorted(found.items(), key=lambda kv: sps[kv[0]].get("duration", 0), reverse=True):
+            sp = sps[label]
+            sp.update(voice_id=m["voice_id"], name=m["name"], score=m["score"],
+                      uncertain=m["uncertain"], auto=True)
+            if not m["uncertain"] and m["voice_id"] not in added_voices:
+                added_voices.add(m["voice_id"])
+                try:
+                    p = get_profile(cfg, m["voice_id"])
+                    add_embedding(cfg, p, work.name, label, sp["embedding"], sp.get("duration", 0), auto=True)
+                except LookupError:
+                    pass
+            log.info("Узнал голос (по списку): %s → %s (%.2f%s)", sp.get("base", label), m["name"], m["score"],
+                     ", не уверен" if m["uncertain"] else "")
+
+    changed = any(display_name(sps[k]) != before[k] for k in sps)
+    if any(not sp.get("name") for sp in sps.values()):
+        data["names_guessed"] = False
+    if changed and note and note.exists():
+        data["protocol_stale"] = True
+    write_speakers(work, data)
+    if changed:
+        for label, sp in sps.items():
+            old_d, new_d = before[label], display_name(sp)
+            if old_d != new_d:
+                replace_in_note(note, old_d, new_d)
+        if (work / SEGMENTS_FILE).exists():
+            rewrite_transcript(work, note)
+    return changed
 
 
 def apply_names(segments: list[dict], work: Path) -> list[dict]:

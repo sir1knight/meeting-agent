@@ -151,7 +151,7 @@ def cloud_backend(cfg: dict) -> str | None:
     """Облачная модель для шаблонов: та, что пишет протоколы, иначе та, что в умном поиске, иначе любая с ключом.
     Локальному Qwen такая задача не по силам (пересказывает встречу вместо шаблона)."""
     keys = {"gemini": bool(config.read_secret("gemini_key")), "openai": bool(config.openai_key(cfg)),
-            "claude": bool(config.anthropic_key(cfg))}
+            "claude": bool(config.anthropic_key(cfg)), "gigachat": bool(config.gigachat_key(cfg))}
     for b in (cfg["llm"].get("backend"), cfg.get("ask", {}).get("backend")):
         if b == "claude-code" or keys.get(b):
             return b

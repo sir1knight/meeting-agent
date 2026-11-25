@@ -27,7 +27,8 @@ log = logging.getLogger(__name__)
 UI_DIR = config.ROOT / "ui"
 STAGES = {"transcribe": "Расшифровка", "diarize": "Разделение собеседников",
           "refine": "Уточняю, кто что сказал", "voices": "Узнаю голоса", "names": "Угадываю имена", "summarize": "Составление протокола", "chapters": "Делю встречу на главы"}
-BACKENDS = {"local": f"На {osutil.PC} (Qwen)", "claude-code": "Claude по подписке (Claude Code)",
+BACKENDS = {"local": f"На {osutil.PC} (Qwen)", "gigachat": "GigaChat API (Сбер) по ключу",
+            "claude-code": "Claude по подписке (Claude Code)",
             "claude": "Claude API по ключу", "gemini": "Gemini API по ключу",
             "openai": "ChatGPT (OpenAI API) по ключу"}
 
@@ -299,6 +300,9 @@ def get_settings(cfg: dict) -> dict:
         "gemini_model": _gemini_model(cfg.get("gemini", {}).get("model")),
         "openai_key_set": bool(config.openai_key(cfg)),
         "openai_model": cfg.get("openai", {}).get("model", "gpt-5"),
+        "gigachat_key_set": bool(config.gigachat_key(cfg)),
+        "gigachat_model": cfg.get("gigachat", {}).get("model", "GigaChat-2"),
+        "gigachat_scope": cfg.get("gigachat", {}).get("scope", "GIGACHAT_API_PERS"),
         "voices_thresholds": {k: cfg["voices"][k] for k in ("match_threshold", "uncertain_threshold",
                                                              "min_speech_seconds")},
         "window_titles": cfg["zoom"]["window_titles"],
@@ -389,17 +393,22 @@ def save_settings(data: dict) -> None:
             raise ValueError(f"Не удалось изменить автозапуск Windows: {e}") from e
     if isinstance(data.get("claude_code_model"), str):
         put("claude", "code_model", data["claude_code_model"].strip())
-    for key, section in {"gemini_model": "gemini", "openai_model": "openai"}.items():
+    for key, section in {"gemini_model": "gemini", "openai_model": "openai", "gigachat_model": "gigachat"}.items():
         if isinstance(data.get(key), str) and data[key].strip():
             put(section, "model", data[key].strip())
+    if data.get("gigachat_scope") in ("GIGACHAT_API_PERS", "GIGACHAT_API_B2B", "GIGACHAT_API_CORP"):
+        put("gigachat", "scope", data["gigachat_scope"])
     if changes:
         config.save_user_settings(changes)
-    for secret in ("hf_token", "anthropic_key", "gemini_key", "openai_key"):
+    for secret in ("hf_token", "anthropic_key", "gemini_key", "openai_key", "gigachat_key"):
         if isinstance(data.get(secret), str):
-            value = re.sub(r"\s+", "", data[secret])
+            raw_val = re.sub(r"^\s*Basic\s+", "", data[secret].strip(), flags=re.I) if secret == "gigachat_key" else data[secret]
+            value = re.sub(r"\s+", "", raw_val)
             prefix = {"hf_token": "hf_", "anthropic_key": "sk-ant-", "openai_key": "sk-"}.get(secret, "")
             if value and secret == "gemini_key" and len(value) < 20:
                 raise ValueError("Ключ Gemini API слишком короткий — скопируйте его целиком из aistudio.google.com")
+            if value and secret == "gigachat_key" and len(value) < 20:
+                raise ValueError("Ключ авторизации GigaChat слишком короткий — скопируйте его целиком из Studio developers.sber.ru")
             if value and secret == "openai_key" and value.startswith("sk-ant-"):
                 raise ValueError("Это ключ Claude API, а не OpenAI — ключ OpenAI берётся на platform.openai.com")
             if value and prefix and (not value.startswith(prefix) or value.count(prefix) > 1):
@@ -695,8 +704,9 @@ class Handler(BaseHTTPRequestHandler):
         job = next((j for j in self.state.jobs.snapshot() if j["id"] == data.get("id")), None)
         if not job:
             raise LookupError("Задача не найдена")
+        llm = data["llm"] if data.get("llm") in BACKENDS else job["llm"]
         self.state.jobs.dismiss(job["id"])
-        self._json(self.state.jobs.add(Path(job["folder"]), job["template"], job["llm"], job["retranscribe"],
+        self._json(self.state.jobs.add(Path(job["folder"]), job["template"], llm, job["retranscribe"],
                                        job.get("asr")))
 
     # --- собеседники встречи и слепки голоса ---
@@ -1130,17 +1140,23 @@ class Handler(BaseHTTPRequestHandler):
         target, names = d.get("target"), d.get("names", [])
         if target == "next":
             saved = participants.write_next(names)
+            self._json({"names": saved})
         elif target == "current":
             rec = self.state.recording
             if rec.get("state") != "recording" or not rec.get("folder"):
                 raise ValueError("Сейчас запись не идёт")
             saved = participants.write(Path(rec["folder"]), names)
+            self._json({"names": saved})
         else:
-            info = _note_info(_note_path(config.load(), str(target or "")))
+            cfg = config.load()
+            note = _note_path(cfg, str(target or ""))
+            info = _note_info(note)
             if not info["source"] or not Path(info["source"]).is_dir():
                 raise ValueError("У этой встречи нет исходной записи")
-            saved = participants.write(Path(info["source"]), names)
-        self._json({"names": saved})
+            src = Path(info["source"])
+            saved = participants.write(src, names)
+            matched = voices.rematch(cfg, src, note)
+            self._json({"names": saved, "matched": matched, "meeting": _note_info(note, full=True)})
 
     def api_post_calendar(self, q):
         """От оболочки: событие календаря для идущей записи {folder, title, attendees: [{name, email}]}."""

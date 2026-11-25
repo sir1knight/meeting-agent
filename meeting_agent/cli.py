@@ -20,12 +20,12 @@ def main() -> None:  # pipeline импортируется по месту: boot
     r.add_argument("--app", default=None,
                    help="bundle id приложения (по умолчанию Zoom) или all — весь звук системы")
     r.add_argument("--template", default=None)
-    r.add_argument("--llm", choices=["local", "claude-code", "claude", "gemini", "openai"], help="кто пишет протокол")
+    r.add_argument("--llm", choices=["local", "claude-code", "claude", "gemini", "openai", "gigachat"], help="кто пишет протокол")
 
     pr = sub.add_parser("process", help="обработать папку записи или любой аудиофайл")
     pr.add_argument("path")
     pr.add_argument("--template", default=None)
-    pr.add_argument("--llm", choices=["local", "claude-code", "claude", "gemini", "openai"], help="кто пишет протокол")
+    pr.add_argument("--llm", choices=["local", "claude-code", "claude", "gemini", "openai", "gigachat"], help="кто пишет протокол")
     pr.add_argument("--gemini-model", default=None, help="разовая модель Gemini для этого протокола")
     pr.add_argument("--asr", choices=["whisper-turbo", "whisper-large", "gigaam"],
                     help="чем распознавать речь (по умолчанию — из настроек)")

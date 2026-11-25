@@ -1019,13 +1019,14 @@ async function openPeople(target) {
   $("peopleHint").textContent = target === "next"
     ? "Список привяжется к ближайшей записи или импортированному файлу. Имена помогают Whisper правильно их расслышать, а Meeting Agent — узнать собеседников по голосу и по обращениям."
     : target === "current" ? "Список учтётся при обработке этой записи."
-    : "Чтобы список учёлся, после сохранения пересоздайте протокол с галочкой «Заново расшифровать аудио».";
+    : "Голоса участников из базы «Голоса» сопоставятся сразу после сохранения. Чтобы обновить текст протокола — нажмите «Пересоздать протокол».";
   $("peopleNames").value = names.join(", ");
+  const normKey = (s) => s.trim().replace(/\.+$/, "").toLowerCase().replace(/ё/g, "е");
   const renderKnown = () => {
-    const have = new Set($("peopleNames").value.split(/[,;\n]/).map((x) => x.trim().toLowerCase()));
+    const have = new Set($("peopleNames").value.split(/[,;\n]/).map(normKey).filter(Boolean));
     $("peopleKnown").innerHTML = data.known.length
       ? '<span class="muted small">Из «Голосов»:</span> ' + data.known.map((n) =>
-        `<button type="button" class="tag${have.has(n.toLowerCase()) ? " on" : ""}" data-name="${esc(n)}">${esc(n)}</button>`).join("")
+        `<button type="button" class="tag${have.has(normKey(n)) ? " on" : ""}" data-name="${esc(n)}">${esc(n)}</button>`).join("")
       : "";
   };
   renderKnown();
@@ -1034,7 +1035,7 @@ async function openPeople(target) {
     const n = e.target.dataset.name;
     if (!n) return;
     const list = $("peopleNames").value.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
-    const i = list.findIndex((x) => x.toLowerCase() === n.toLowerCase());
+    const i = list.findIndex((x) => normKey(x) === normKey(n));
     i >= 0 ? list.splice(i, 1) : list.push(n);
     $("peopleNames").value = list.join(", ");
     renderKnown();
@@ -1051,9 +1052,13 @@ $("peopleDialog").addEventListener("close", async () => {
       target, names: v === "clear" ? [] : $("peopleNames").value.split(/[,;\n]/),
     } });
     if (peopleTarget === "meeting") {
-      S.current.expected = r.names;
+      if (r.meeting) S.current = r.meeting;
+      else S.current.expected = r.names;
       renderMeeting();
-      toast("Сохранено. Пересоздайте протокол с галочкой «Заново расшифровать аудио», чтобы список учёлся", 6000);
+      loadMeetings();
+      toast(r.matched
+        ? "Участники сопоставлены по голосу. Чтобы обновить текст протокола — нажмите «Пересоздать протокол»"
+        : "Список участников сохранён. Нажмите «Пересоздать протокол», чтобы учесть его в протоколе", 6000);
     } else {
       toast(r.names.length ? "Участники: " + r.names.join(", ") : "Список очищен");
     }
@@ -1130,18 +1135,19 @@ $("assignDialog").addEventListener("close", async () => {
   }
 });
 
-// Облачная модель не составила протокол (перегрузка, лимит, нет связи) — предложить модель полегче или Qwen.
+// Облачная модель не составила протокол (перегрузка, лимит, нет связи, регион/VPN, отказ API) — предложить модель полегче или Qwen.
 function protocolFallbackHtml(m) {
-  if (!/перегруж|лимит|429|50[0234]|Нет связи|timed out|timeout|не ответил/i.test(m.protocol_error || "")) return "";
+  const err = m.protocol_error || "";
+  if (!err) return "";
   const btns = [];
   const backend = m.llm || (S.settings && S.settings.llm_backend) || "";
-  if (backend === "gemini") {
+  if (backend === "gemini" && /перегруж|лимит|429|50[0234]|Нет связи|timed out|timeout|не ответил/i.test(err)) {
     const cur = (S.settings && S.settings.gemini_model) || "";
     const light = GEMINI_LIGHT.find((x) => x !== cur);
     if (light) btns.push(`<button class="ghost" id="staleLight" data-model="${esc(light)}" title="Более лёгкая бесплатная модель Gemini">Составить на ${esc(light)}</button>`);
   }
   const qwen = S.status && S.status.models && S.status.models.llm && S.status.models.llm.status === "ready";
-  if (backend && backend !== "local" && qwen) {
+  if (backend !== "local" && qwen) {
     btns.push(`<button class="ghost" id="staleQwen" title="Ничего не уходит в интернет">Составить на Qwen (на ${PC})</button>`);
   }
   return btns.length ? " " + btns.join(" ") : "";
@@ -1653,14 +1659,19 @@ $("permBanner").addEventListener("click", (e) => {
 
 // ---------- очередь обработки ----------
 
+const SErrJobs = new Set();
+
 function renderJobs() {
   const jobs = (S.status && S.status.jobs) || [];
+  const qwen = S.status && S.status.models && S.status.models.llm && S.status.models.llm.status === "ready";
   $("jobs").innerHTML = jobs.filter((j) => j.status !== "done").map((j) => {
     const name = j.folder.split("/").pop();
     if (j.status === "error") {
+      const cloudErr = qwen && j.llm !== "local" && /Gemini|Claude|OpenAI|ChatGPT|Google|Anthropic|GigaChat|Сбер/i.test(j.error || "");
       return `<div class="job error"><div class="j-title">Не удалось обработать</div>
         <div class="j-sub">${esc(j.error)}</div>
         <div class="j-actions"><button class="link" data-retry="${j.id}">Повторить</button>
+        ${cloudErr ? `<button class="link" data-retry-qwen="${j.id}" title="Составить протокол локально на ${PC}">На Qwen</button>` : ""}
         <button class="link" data-dismiss="${j.id}">Скрыть</button></div></div>`;
     }
     const stage = j.status === "queued" ? "В очереди" : (j.stage_title || "Подготовка") + "…";
@@ -1668,7 +1679,7 @@ function renderJobs() {
       <div class="j-sub">${esc(stage)} · ${esc(name)}</div></div>`;
   }).join("");
 
-  // Готовые задачи: обновить список и открыть новую заметку.
+  // Готовые и упавшие задачи: обновить список и открытую заметку.
   for (const j of jobs) {
     if (j.status === "done" && !S.doneJobs.has(j.id)) {
       S.doneJobs.add(j.id);
@@ -1677,11 +1688,22 @@ function renderJobs() {
           openMeeting(j.note);
         }
       });
+    } else if (j.status === "error" && !SErrJobs.has(j.id)) {
+      SErrJobs.add(j.id);
+      if (S.view === "meeting" && S.current && S.current.source === j.folder) {
+        openMeeting(S.current.id);
+      }
     }
   }
 }
 
 $("jobs").addEventListener("click", async (e) => {
+  const qwenId = e.target.dataset.retryQwen;
+  if (qwenId) {
+    await api("jobs/retry", { method: "POST", body: { id: qwenId, llm: "local" } }).catch((err) => toast(err.message));
+    pollStatus();
+    return;
+  }
   const id = e.target.dataset.retry || e.target.dataset.dismiss;
   if (!id) return;
   await api(e.target.dataset.retry ? "jobs/retry" : "jobs/dismiss", { method: "POST", body: { id } }).catch((err) => toast(err.message));
@@ -1896,6 +1918,9 @@ function hfSetupHtml(s, st) {
 function backendRadios(s) {
   const desc = {
     "local": `Бесплатно, ничего не уходит в интернет. Нужна модель Qwen (~${IS_WIN ? "4,7" : "4,3"} ГБ). Протокол часовой встречи — около 10 минут на Mac M1 Pro, пара минут на мощной видеокарте NVIDIA, 20–50 минут на процессоре.`,
+    "gigachat": s.gigachat_key_set
+      ? `Работает в РФ без VPN. Модель ${s.gigachat_model || "GigaChat-2"} (${s.gigachat_scope === "GIGACHAT_API_PERS" ? "физлица" : "юрлица"}).`
+      : "Работает в РФ без VPN. Физлицам даются бесплатные токены в Studio (developers.sber.ru) — выберите этот вариант и вставьте ключ авторизации.",
     "claude-code": s.claude_code_path
       ? "Без доплаты, расходует лимиты вашей подписки Claude. Протоколы точнее."
       : "Нужен установленный Claude Code с входом по подписке — сейчас он не найден.",
@@ -1905,7 +1930,7 @@ function backendRadios(s) {
     "openai": s.openai_key_set ? `Модель ${s.openai_model}, оплата за запросы по тарифу OpenAI (отдельно от подписки ChatGPT Plus).`
       : "Нужен платный ключ OpenAI API — выберите этот вариант, и под ним появится поле для ключа.",
   };
-  const cloud = { "claude-code": "Anthropic", "claude": "Anthropic", "gemini": "Google", "openai": "OpenAI" };
+  const cloud = { "gigachat": "Сбера (GigaChat)", "claude-code": "Anthropic", "claude": "Anthropic", "gemini": "Google", "openai": "OpenAI" };
   return Object.entries(s.backends).map(([k, v]) => `<label class="radio${k === s.llm_backend ? " selected" : ""}">
     <input type="radio" name="backend" value="${k}"${k === s.llm_backend ? " checked" : ""}>
     <div><div class="r-title">${esc(v)}${S.view === "setup" ? recoBadge("llm", k) : ""}</div><div class="r-desc">${esc(desc[k] || "")}</div>
@@ -1915,6 +1940,8 @@ function backendRadios(s) {
 
 // Ключи облачных вариантов: вводятся прямо под выбранным вариантом (и при первом запуске).
 const BACKEND_KEYS = {
+  "gigachat": { field: "gigachat_key", set: "gigachat_key_set", title: "Ключ авторизации GigaChat API", placeholder: "Base64-ключ из Studio…",
+                url: "https://developers.sber.ru/studio" },
   "claude": { field: "anthropic_key", set: "anthropic_key_set", title: "Ключ Claude API", placeholder: "sk-ant-…",
               url: "https://platform.claude.com/settings/keys" },
   "gemini": { field: "gemini_key", set: "gemini_key_set", title: "Ключ Gemini API", placeholder: "AIza…",
@@ -1927,7 +1954,7 @@ const BACKEND_KEYS = {
 const GEMINI_PRESETS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"];
 
 // --- Проверка ключей API: крошечный пробный запрос к сервису (summarize.check_key) ---
-const KEY_SERVICE = { anthropic_key: "claude", gemini_key: "gemini", openai_key: "openai" };
+const KEY_SERVICE = { anthropic_key: "claude", gemini_key: "gemini", openai_key: "openai", gigachat_key: "gigachat" };
 S.keyCheck = {};
 async function checkKey(service) {
   S.keyCheck[service] = { loading: true };
@@ -2274,6 +2301,7 @@ function renderSettings() {
   ];
 
   const askDescs = {
+    "gigachat": "По ключу GigaChat API (ниже), работает в РФ без VPN. Фрагменты встреч уходят в облако Сбера.",
     "claude-code": "По подписке Claude, без доплаты. Фрагменты встреч уходят в облако Anthropic.",
     "claude": "По ключу Claude API (ниже). Фрагменты уходят в облако Anthropic.",
     "gemini": "По ключу Gemini API (ниже). Фрагменты уходят в облако Google.",
@@ -2372,6 +2400,30 @@ function renderSettings() {
           `<option value="${k}"${k === s.ask_backend ? " selected" : ""}>${esc(v)}</option>`).join("")}</select>`),
     ].join(""))
     + stSection("Ключи облачных API", [
+      `<div class="st-block">
+        <div class="st-title">GigaChat API (Сбер) ${s.gigachat_key_set ? '<span class="badge ok">сохранён</span>' : ""}</div>
+        <div class="st-desc">Работает в РФ без VPN. Ключ авторизации создаётся в <a href="https://developers.sber.ru/studio" target="_blank">developers.sber.ru/studio</a> (<a href="https://developers.sber.ru/docs/ru/gigachat/quickstart/ind-using-api" target="_blank">инструкция</a>).</div>
+        <div class="st-key-row"><input class="st-input" type="password" id="sGigachat" placeholder="${s.gigachat_key_set ? "•••••• — вставьте новый, чтобы заменить" : "Ключ авторизации (Base64)…"}" autocomplete="off">
+          <button class="st-btn" type="button" id="sGigachatSave">Сохранить</button>
+          ${s.gigachat_key_set ? '<button class="st-btn" type="button" id="sGigachatDel">Удалить</button>' : ""}</div>
+        ${keyCheckHtml("gigachat", s.gigachat_key_set)}
+        <div class="st-key-row" style="margin-top:10px">
+          <span class="muted small">Модель:</span>
+          <select class="st-select" id="sGigachatModel">
+            ${[["GigaChat-2", "GigaChat 2 Lite (быстрая, бесплатные токены)"],
+               ["GigaChat-2-Pro", "GigaChat 2 Pro"],
+               ["GigaChat-2-Max", "GigaChat 2 Max (максимальная точность)"]].map(([id, label]) =>
+              `<option value="${id}"${(s.gigachat_model || "GigaChat-2") === id ? " selected" : ""}>${label}</option>`).join("")}
+          </select>
+          <span class="muted small" style="margin-left:8px">Доступ:</span>
+          <select class="st-select" id="sGigachatScope">
+            ${[["GIGACHAT_API_PERS", "Физлица (PERS)"],
+               ["GIGACHAT_API_B2B", "Юрлица — пакеты (B2B)"],
+               ["GIGACHAT_API_CORP", "Юрлица — pay-as-you-go (CORP)"]].map(([id, label]) =>
+              `<option value="${id}"${(s.gigachat_scope || "GIGACHAT_API_PERS") === id ? " selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </div>
+      </div>`,
       `<div class="st-block">
         <div class="st-title">Gemini API ${s.gemini_key_set ? '<span class="badge ok">сохранён</span>' : ""}</div>
         <div class="st-desc">Ключ создаётся на <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a>.</div>
@@ -2507,6 +2559,13 @@ function renderSettings() {
   if ($("sAskBackend")) $("sAskBackend").onchange = async (e) => {
     if (await save({ ask_backend: e.target.value }, "Умный поиск: " + s.ask_backends[e.target.value])) renderSettings();
   };
+  if ($("sGigachatSave")) $("sGigachatSave").onclick = async () => {
+    const v = $("sGigachat").value.trim();
+    if (v && await save({ gigachat_key: v }, "Ключ GigaChat сохранён")) { renderSettings(); checkKey("gigachat"); }
+  };
+  if ($("sGigachatDel")) $("sGigachatDel").onclick = async () => { if (await save({ gigachat_key: "" }, "Ключ GigaChat удалён")) renderSettings(); };
+  if ($("sGigachatModel")) $("sGigachatModel").onchange = (e) => { delete S.keyCheck.gigachat; save({ gigachat_model: e.target.value }, "Модель GigaChat: " + e.target.value); };
+  if ($("sGigachatScope")) $("sGigachatScope").onchange = (e) => { delete S.keyCheck.gigachat; save({ gigachat_scope: e.target.value }, "Доступ GigaChat обновлён"); };
   if ($("sGeminiSave")) $("sGeminiSave").onclick = async () => {
     const v = $("sGemini").value.trim();
     if (v && await save({ gemini_key: v }, "Ключ Gemini сохранён")) { S.geminiModels = undefined; renderSettings(); checkKey("gemini"); }
@@ -2634,7 +2693,9 @@ let pollTimer;
 async function pollStatus() {
   clearTimeout(pollTimer);
   try {
+    const first = !S.status;
     S.status = await api("status");
+    if (first && S.view === "meeting" && S.current && S.current.protocol_error) renderMeeting();
     if ($("updDialog").open) paintUpdWindow(); else paintUpdBadge();
     renderRecording();
     renderJobs();

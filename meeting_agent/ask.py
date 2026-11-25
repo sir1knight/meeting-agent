@@ -22,7 +22,8 @@ from .osutil import PC
 
 log = logging.getLogger(__name__)
 
-BACKENDS = {"claude-code": "Claude по подписке (Claude Code)", "claude": "Claude API по ключу",
+BACKENDS = {"gigachat": "GigaChat API (Сбер) по ключу",
+            "claude-code": "Claude по подписке (Claude Code)", "claude": "Claude API по ключу",
             "gemini": "Gemini API по ключу", "openai": "ChatGPT (OpenAI API) по ключу",
             "local": f"Qwen на {PC}"}
 
@@ -220,7 +221,7 @@ def backend(cfg: dict) -> str:
 
 
 def _llm(cfg: dict, user: str, system: str = SYSTEM) -> str:
-    from .summarize import chat_claude, chat_claude_code, chat_gemini, chat_openai
+    from .summarize import chat_claude, chat_claude_code, chat_gemini, chat_gigachat, chat_openai
 
     b = backend(cfg)
     if b == "claude-code":
@@ -232,6 +233,8 @@ def _llm(cfg: dict, user: str, system: str = SYSTEM) -> str:
         return chat_gemini(cfg, user, system, cfg.get("ask", {}).get("gemini_model"))
     if b == "openai":
         return chat_openai(cfg, user, system)
+    if b == "gigachat":
+        return chat_gigachat(cfg, user, system)
     # Qwen — в отдельном процессе: сервер не держит 4,5 ГБ модели в памяти между вопросами.
     r = subprocess.run([sys.executable, "-m", "meeting_agent", "ask-llm"], input=json.dumps(
         {"system": system, "user": user}, ensure_ascii=False), capture_output=True, text=True,
