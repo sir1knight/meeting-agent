@@ -1689,7 +1689,7 @@ function renderLive(scrollDown = false) {
   let streamHtml = "";
   if (!lv.enabled) {
     streamHtml = `<div class="live-empty">Распознавание по ходу встречи сейчас не активно (${esc(lv.reason)}).<br>
-      Включите «Распознавать по ходу встречи» и быструю модель (GigaAM или Whisper turbo) в Настройках → Речь и голоса.</div>`;
+      Включите «Распознавать по ходу встречи» и быструю модель (${IS_WIN ? "GigaAM" : "GigaAM, Whisper turbo или Apple Speech"}) в Настройках → Речь и голоса.</div>`;
   } else if (!(lv.segments || []).length) {
     streamHtml = `<div class="live-empty"><span class="spinner"></span> Слушаю разговор… Первые реплики появятся через 10–15 секунд после начала речи.</div>`;
   } else {
@@ -2837,7 +2837,7 @@ function renderSettings() {
     body = stSection("Распознавание речи", [
       `<div class="st-block"><div class="st-desc">Всё работает локально на ${PC}.</div>${asrRadios(s)}</div>`,
       stRow("bolt", "Распознавать по ходу встречи",
-        `Показывает «Живой текст» со спикерами и именами из базы «Голоса» прямо на созвоне (${IS_WIN ? "GigaAM" : "GigaAM и Whisper turbo"}, от батареи паузится)`,
+        `Показывает «Живой текст» со спикерами и именами из базы «Голоса» прямо на созвоне (${IS_WIN ? "GigaAM" : "GigaAM, Whisper turbo и Apple Speech"}, от батареи паузится)`,
         stSwitch("sLive", s.live_enabled)),
       `<div class="st-block">
         <div class="st-title">${ST_ICONS.book.replace("<svg ", '<svg style="width:15px;height:15px;opacity:.7" ')} Глоссарий терминов и имён</div>
