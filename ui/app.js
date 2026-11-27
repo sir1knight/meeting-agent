@@ -1913,18 +1913,20 @@ function fmtEta(sec) {
   return `≈ ${Math.floor(sec / 3600)} ч ${Math.round(sec % 3600 / 60)} мин`;
 }
 
-// Состояние загрузки модели: полоса, «скачано из», скорость, пауза и продолжение.
+// Состояние загрузки модели: полоса, проценты, «скачано из», скорость, пауза и продолжение.
 function downloadWidget(name, m, sizeHint) {
-  const pct = m.total ? Math.min(100, (100 * m.done) / m.total) : 0;
+  const total = m.total || sizeHint || 0;
+  const pct = total ? Math.min(100, (100 * (m.done || 0)) / total) : 0;
+  const pctNum = Math.round(pct);
   const bar = `<div class="bar"><div style="width:${pct}%"></div></div>`;
   if (m.status === "downloading") {
     // Первые секунды идут мелкие служебные файлы — скорость по ним бессмысленна.
-    const speed = m.speed > 1e5 ? ` · ${fmtSpeed(m.speed)} · ${fmtEta((m.total - m.done) / m.speed)}` : " · начинаю…";
-    return `<div class="dl">${bar}<div class="dl-row"><span class="muted small">${fmtBytes(m.done)} из ${fmtBytes(m.total)}${speed}</span>
+    const speed = m.speed > 1e5 ? ` · ${fmtSpeed(m.speed)} · ${fmtEta((total - m.done) / m.speed)}` : " · начинаю…";
+    return `<div class="dl">${bar}<div class="dl-row"><span class="muted small"><b class="dl-pct">${pctNum}%</b> · ${fmtBytes(m.done)} из ${fmtBytes(total)}${speed}</span>
       ${m.pausable ? `<button class="ghost small" type="button" data-pause="${name}">Пауза</button>` : '<span class="spinner"></span>'}</div></div>`;
   }
   if (m.status === "paused") {
-    return `<div class="dl">${bar}<div class="dl-row"><span class="muted small">Пауза: ${fmtBytes(m.done)} из ${fmtBytes(m.total)}</span>
+    return `<div class="dl">${bar}<div class="dl-row"><span class="muted small">Пауза · <b class="dl-pct">${pctNum}%</b> · ${fmtBytes(m.done)} из ${fmtBytes(total)}</span>
       <button class="ghost small" type="button" data-download="${name}">Продолжить</button></div></div>`;
   }
   if (m.status === "error") {
@@ -1961,6 +1963,51 @@ document.addEventListener("click", async (e) => {
 
 // ---------- первый запуск ----------
 
+const SETUP_TEST = { busy: false, result: null, error: null };
+
+function setupProgressHtml(st) {
+  const req = Object.entries(st.models || {}).filter(([k, m]) => m.required && k !== "diarization");
+  if (!req.length) return "";
+  let sum = 0;
+  for (const [, m] of req) {
+    if (m.status === "ready") sum += 1;
+    else if (m.total > 0 && m.done > 0) sum += Math.min(0.99, m.done / m.total);
+  }
+  const pct = Math.round((100 * sum) / req.length);
+  const doneCount = req.filter(([, m]) => m.status === "ready").length;
+  return `<div class="setup-prog">
+    <div class="setup-prog-head">
+      <span>Готовность к работе</span>
+      <span><b>${pct}%</b> · ${doneCount} из ${req.length} модулей</span>
+    </div>
+    <div class="bar"><div style="width:${pct}%"></div></div>
+  </div>`;
+}
+
+function setupSampleTestHtml(s, st) {
+  const asr = (s.asr_engines || {})[s.asr_engine] || {};
+  const asrReady = asr.ready || (st.models && st.models.whisper && st.models.whisper.status === "ready");
+  const key = "setup/sample";
+  const playing = audioKey === key;
+  let resHtml = "";
+  if (SETUP_TEST.busy) {
+    resHtml = '<div class="setup-test-res muted small"><span class="spinner"></span> Распознаю тестовую запись…</div>';
+  } else if (SETUP_TEST.error) {
+    resHtml = `<div class="setup-test-res err small">${esc(SETUP_TEST.error)}</div>`;
+  } else if (SETUP_TEST.result) {
+    const r = SETUP_TEST.result;
+    resHtml = `<div class="setup-test-res ok small"><b>✓ ${esc(r.engine)} · ${esc(String(r.seconds).replace(".", ","))} с:</b> «${esc(r.text)}»</div>`;
+  }
+  return `<div class="setup-test-box">
+    <div class="setup-test-acts">
+      <button class="st-btn" type="button" id="setupTestBtn"${!asrReady || SETUP_TEST.busy ? " disabled" : ""}>Проверить на тестовой записи</button>
+      <button class="play${playing ? " playing" : ""}" type="button" id="setupPlayBtn" data-play-key="${key}" title="${playing ? "Остановить" : "Послушать тестовую запись"}">${playing ? PAUSE_ICO : PLAY_ICO}</button>
+      <span class="muted small">${asrReady ? "Встроенная русская запись (8 с) — можно сразу проверить, как распознаётся речь" : "Сначала скачайте выбранную модель распознавания речи"}</span>
+    </div>
+    ${resHtml}
+  </div>`;
+}
+
 function renderSetup() {
   const st = S.status, s = S.settings;
   if (!st || !s) return;
@@ -1976,17 +2023,19 @@ function renderSetup() {
   const step = () => ++n;
   const html = `<div class="page">
     <h1>Добро пожаловать в Meeting Agent</h1>
-    <p class="muted">Для работы нужно один раз скачать модели. Записи и расшифровки остаются на ${PC}.</p>
+    <p class="muted">Для работы нужно один раз подготовить модули. Записи и расшифровки остаются на ${PC}.</p>
+    ${setupProgressHtml(st)}
     ${hardwareHtml(s)}
     <div class="card"><h2>${step()}. Кто пишет протоколы</h2>
       <div class="hint">Звук в любом случае расшифровывается на ${PC}. Выбор можно поменять в настройках.</div>
       ${backendRadios(s)}</div>
     <div class="card"><h2>${step()}. Распознавание речи</h2>
       <div class="hint">Выберите модель и нажмите «Скачать». Загрузку можно прервать: при следующем запуске она продолжится с того же места. Модель можно сменить в настройках.</div>
-      ${asrRadios(s)}</div>
+      ${asrRadios(s)}
+      ${setupSampleTestHtml(s, st)}</div>
     ${nvidiaStep ? gpuCardHtml(`${step()}. Ускорение NVIDIA${S.hardware && S.hardware.recommend.gpu_accel ? "" : " — по желанию"}`) : ""}
     ${other ? `<div class="card"><h2>${step()}. Модель для протоколов</h2>${other}</div>` : ""}
-    <div class="card"><h2>${step()}. Разделение собеседников — по желанию</h2>${hfSetupHtml(s, st)}</div>
+    <div class="card"><h2>${step()}. Разделение собеседников — по желанию</h2>${diarizationRadios(s, st)}</div>
     <div class="card"><h2>${step()}. Разрешения ${IS_WIN ? "Windows" : "macOS"}</h2>
       <div class="hint">${IS_WIN
         ? "Приложение записывает ваш микрофон и весь звук компьютера (в нём собеседники из Zoom). Если запись не начинается, откройте Параметры Windows → Конфиденциальность и защита → Микрофон и включите «Разрешить классическим приложениям доступ к микрофону». Собеседники пишутся с устройства вывода по умолчанию — в Zoom оставьте динамик «Как в системе»."
@@ -2004,6 +2053,20 @@ function renderSetup() {
   }
   bindBackendRadios($("setup"));
   bindGpu($("gpuCard"));
+  if ($("setupPlayBtn")) $("setupPlayBtn").onclick = () => playAudio("setup/sample", $("setupPlayBtn"));
+  if ($("setupTestBtn")) $("setupTestBtn").onclick = async () => {
+    SETUP_TEST.busy = true;
+    SETUP_TEST.error = null;
+    SETUP_TEST.result = null;
+    renderSetup();
+    try {
+      SETUP_TEST.result = await api("setup/test", { method: "POST", body: {} });
+    } catch (e) {
+      SETUP_TEST.error = e.message;
+    }
+    SETUP_TEST.busy = false;
+    renderSetup();
+  };
   $("setupDone").onclick = () => { S.setupDismissed = true; show("meeting"); };
   $("setupLater").onclick = () => { S.setupDismissed = true; show("meeting"); };
 }
@@ -2252,14 +2315,37 @@ function backendExtra(s, k) {
     <div class="hint">Подробнее: <a href="https://code.claude.com/docs/en/setup" target="_blank">code.claude.com/docs/en/setup</a></div></div>`;
 }
 
+function diarizationRadios(s, st) {
+  const engines = s.diarization_engines || {};
+  const m = st && st.models && st.models.diarization;
+  const cur = s.diarization_engine || "pyannote";
+  return Object.entries(engines).map(([k, e]) => {
+    const on = k === cur;
+    const ready = e.ready || (on && m && m.status === "ready");
+    const badge = ready ? '<span class="badge ok">скачана</span>'
+      : on ? "" : `<span class="badge warn">не скачана · ${fmtBytes(e.size)}</span>`;
+    let extra = "";
+    if (on && !ready && m) {
+      if (e.requires_token) extra = S.view === "setup" ? hfSetupHtml(s, st) : "";
+      else extra = downloadWidget("diarization", m, e.size);
+    } else if (on && e.requires_token && S.view === "setup") {
+      extra = hfSetupHtml(s, st);
+    }
+    return `<label class="radio${on ? " selected" : ""}">
+      <input type="radio" name="diarization_engine" value="${k}"${on ? " checked" : ""}>
+      <div style="flex:1"><div class="r-title">${esc(e.title)} ${badge}</div><div class="r-desc">${esc(e.desc)}</div>${extra}</div></label>`;
+  }).join("");
+}
+
 function asrRadios(s) {
   const m = S.status && S.status.models && S.status.models.whisper;
   return Object.entries(s.asr_engines).map(([k, e]) => {
     const on = k === s.asr_engine;
     const ready = e.ready || (on && m && m.status === "ready");
-    const badge = ready ? '<span class="badge ok">скачана</span>'
+    const badge = ready ? `<span class="badge ok">${e.size === 0 ? "встроена" : "скачана"}</span>`
+      : on && e.size === 0 ? '<span class="badge warn">требуется сборка Apple Speech</span>'
       : on ? "" : `<span class="badge warn">не скачана · ${fmtBytes(e.size)}</span>`;
-    const dl = on && !ready && m ? downloadWidget("whisper", m, e.size) : "";
+    const dl = on && !ready && m && e.size > 0 ? downloadWidget("whisper", m, e.size) : "";
     return `<label class="radio${on ? " selected" : ""}">
       <input type="radio" name="asr" value="${k}"${on ? " checked" : ""}>
       <div style="flex:1"><div class="r-title">${esc(e.title)} ${badge}${S.view === "setup" ? recoBadge("asr", k) : ""}</div><div class="r-desc">${esc(e.desc)}</div>${dl}</div></label>`;
@@ -2274,6 +2360,18 @@ function bindBackendRadios(root) {
       S.view === "setup" ? renderSetup() : renderSettings();
       const e = S.settings.asr_engines[r.value];
       toast(e.ready ? `Распознавание: ${e.title}` : `${e.title}: модель ещё не скачана — нажмите «Скачать»`, 5000);
+    } catch (e) {
+      toast(e.message);
+    }
+  }));
+  root.querySelectorAll('input[name="diarization_engine"]').forEach((r) => r.addEventListener("change", async () => {
+    try {
+      S.settings = await api("settings", { method: "POST", body: { diarization_engine: r.value } });
+      await pollStatus();
+      S.view === "setup" ? renderSetup() : renderSettings();
+      loadVoices(true);
+      const e = S.settings.diarization_engines[r.value];
+      toast(e.ready ? `Спикеры: ${e.title}` : `${e.title}: модель ещё не скачана — нажмите «Скачать»`, 5000);
     } catch (e) {
       toast(e.message);
     }
@@ -2756,6 +2854,11 @@ function renderSettings() {
       stRow("spark", "Угадывать имена из разговора", "Если имя не в базе голосов — отмечается звёздочкой «Олег*»",
         stSwitch("sGuess", s.names_guess, !s.diarization_enabled), s.diarization_enabled ? "" : "disabled"),
       `<div class="st-block">
+        <div class="st-title">Движок разделения спикеров</div>
+        <div class="st-desc">Выберите между локальным WeSpeaker (без регистрации и токена) и pyannote на Hugging Face.</div>
+        ${diarizationRadios(s, S.status)}
+      </div>`,
+      s.diarization_engine === "pyannote" ? `<div class="st-block">
         <div class="st-title">Токен Hugging Face ${s.hf_token_set ? '<span class="badge ok">сохранён</span>' : ""}</div>
         <div class="st-desc">Нужен бесплатный токен типа Read и согласие («Agree») для
           <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank">speaker-diarization-3.1</a> и
@@ -2764,7 +2867,7 @@ function renderSettings() {
           <button class="st-btn" type="button" id="sHfSave">Сохранить</button>
           <button class="st-btn" type="button" id="sHfCheck"${s.hf_token_set ? "" : " disabled"}>Проверить</button></div>
         <div id="sHfResult" class="st-desc" style="margin-top:8px"></div>
-      </div>`,
+      </div>` : "",
     ].join(""));
   } else {
     const curVer = (S.status && S.status.updates && S.status.updates.version) ? `v${esc(S.status.updates.version)}` : "";

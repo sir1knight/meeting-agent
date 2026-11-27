@@ -28,7 +28,7 @@ def main() -> None:  # pipeline импортируется по месту: boot
     pr.add_argument("--llm", choices=["local", "claude-code", "claude", "gemini", "openai", "gigachat"], help="кто пишет протокол")
     pr.add_argument("--gemini-model", default=None, help="разовая модель Gemini для этого протокола")
     pr.add_argument("--model-override", default=None, help="разовая модель выбранного облачного сервиса")
-    pr.add_argument("--asr", choices=["whisper-turbo", "whisper-large", "gigaam"],
+    pr.add_argument("--asr", choices=["whisper-turbo", "whisper-large", "gigaam", "apple-speech"],
                     help="чем распознавать речь (по умолчанию — из настроек)")
     pr.add_argument("--retranscribe", action="store_true",
                     help="расшифровать заново, даже если расшифровка уже есть")

@@ -850,3 +850,24 @@ dialog .check { font-weight: 400; }
   margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line);
   display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px;
 }
+
+.setup-prog {
+  margin: 12px 0 18px; padding: 12px 14px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--line);
+}
+.setup-prog-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 13px; margin-bottom: 8px;
+}
+.dl-pct { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 12px; color: var(--fg); }
+.setup-test-box {
+  margin-top: 14px; padding: 12px 14px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--line);
+}
+.setup-test-acts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.setup-test-res {
+  margin-top: 10px; padding: 10px 12px; border-radius: 8px;
+  background: var(--bg); border: 1px solid var(--line); font-size: 13px; line-height: 1.5;
+}
+.setup-test-res.ok { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.setup-test-res.err { border-color: color-mix(in srgb, var(--err) 45%, var(--line)); color: var(--err); }

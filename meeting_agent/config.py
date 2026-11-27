@@ -34,6 +34,7 @@ DEFAULTS = {
                 "glossary": []},
     "diarization": {
         "enabled": True,
+        "engine": "pyannote",
         "model": "pyannote/speaker-diarization-3.1",
         "hf_token": "",
         "device": "mps",

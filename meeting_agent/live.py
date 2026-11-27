@@ -25,7 +25,10 @@ TICK = 12.0          # как часто дочитывать звук, секу
 TAIL_GUARD = 2.0     # последние секунды не трогаем: файл дописывается, фраза может продолжаться
 TRACKS = {"mic": {"gap": 0.4, "max": 18.0}, "others": {"gap": 0.3, "max": 8.0}}
 # Тяжёлые модели во время звонка не запускаем. На Windows Whisper идёт на процессоре — только GigaAM.
-LIVE_ENGINES = ("gigaam",) if osutil.IS_WIN else ("gigaam", "whisper-turbo")
+LIVE_ENGINES = ("gigaam",) if osutil.IS_WIN else ("gigaam", "whisper-turbo", "apple-speech")
+REFINE_MIN_AGE = 15.0  # переслушиваем реплику через 15–35 секунд с полным контекстом фразы
+REFINE_MAX_AGE = 35.0
+HISTORY_MAX_SEC = 45.0
 STOP_FILE = ".stop"  # на Windows нет SIGTERM «по-хорошему»: сервер просит остановиться этим файлом
 LIVE_SPEAKERS_FILE = "speakers.json"
 _stop = False
@@ -111,6 +114,7 @@ def snapshot(work: Path, cfg: dict) -> dict:
                 "speaker": me_name,
                 "track": "mic",
                 "text": s["text"].strip(),
+                "refined": bool(s.get("refined")),
             })
     single_unnamed = len(live_sps) == 1 and not next(iter(live_sps.values())).get("name")
     for s in oth_res.get("segments", []):
@@ -129,6 +133,7 @@ def snapshot(work: Path, cfg: dict) -> dict:
             "label": cid,
             "track": "others",
             "text": s["text"].strip(),
+            "refined": bool(s.get("refined")),
         })
     merged.sort(key=lambda x: (x["start"], 0 if x["track"] == "mic" else 1))
 
@@ -193,15 +198,14 @@ class LiveSpeakerTracker:
 
         if self._infer is None:
             from pyannote.audio import Inference, Model
-            from .config import hf_token
             from .diarize import EMBEDDING_FALLBACK
 
             device = osutil.torch_device(cfg["diarization"].get("device"))
-            model = Model.from_pretrained(EMBEDDING_FALLBACK, token=hf_token(cfg))
+            model = Model.from_pretrained(EMBEDDING_FALLBACK, token=False)
             infer = Inference(model, window="whole")
             infer.to(device)
             self._infer = infer
-            log.info("Живое распознавание голосов (pyannote) подключено")
+            log.info("Живое распознавание голосов (WeSpeaker) подключено")
         v = np.asarray(self._infer({"waveform": torch.from_numpy(piece[None].copy()), "sample_rate": SR}),
                        dtype="float32")
         n = float(np.linalg.norm(v))
@@ -364,9 +368,27 @@ class Track:
         self.until: float = prev.get("until", 0.0)      # секунды дорожки, распознано до
         self.frame = 0                                   # кадров исходного файла прочитано
         self.buf = None                                  # звук с self.until, 16 кГц
+        self.history_buf = None                          # кольцевой буфер последних ~45 с для переслушивания
+        self.history_start: float = self.until
         self.out = live_dir(work) / f"{name}.json"
         self.asr = None
         self.tracker = tracker
+
+    def append_history(self, new) -> None:
+        import numpy as np
+
+        if new is None or len(new) == 0:
+            return
+        if self.history_buf is None:
+            self.history_buf = new.copy()
+            self.history_start = self.until
+        else:
+            self.history_buf = np.concatenate([self.history_buf, new])
+        max_samples = int(HISTORY_MAX_SEC * SR)
+        if len(self.history_buf) > max_samples:
+            drop = len(self.history_buf) - max_samples
+            self.history_buf = self.history_buf[drop:]
+            self.history_start += drop / SR
 
     def save(self) -> None:
         self.out.parent.mkdir(parents=True, exist_ok=True)
@@ -374,6 +396,51 @@ class Track:
         tmp.write_text(json.dumps({"until": round(self.until, 2), "asr": self.asr, "segments": self.segments},
                                   ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.out)
+
+
+def _refine_delayed(track: Track, cfg: dict) -> bool:
+    """Асинхронное переслушивание реплик, сказанных 15–35 секунд назад, с более широким контекстом:
+    убирает обрывы краёв и опечатки первичного потокового распознавания."""
+    from .transcribe import transcribe_array
+
+    if track.history_buf is None or len(track.history_buf) < SR * 2:
+        return False
+    now_pos = track.history_start + len(track.history_buf) / SR
+    changed = False
+    refined_this_tick = 0
+    for seg in track.segments:
+        if refined_this_tick >= 2:
+            break
+        if seg.get("refined"):
+            continue
+        s0, s1 = float(seg.get("start", 0.0)), float(seg.get("end", 0.0))
+        age = now_pos - s1
+        if age < REFINE_MIN_AGE or age > REFINE_MAX_AGE:
+            continue
+        pad_s = max(track.history_start, s0 - 0.35)
+        pad_e = min(now_pos, s1 + 0.35)
+        if pad_e - pad_s < 0.8 or s0 < track.history_start:
+            seg["refined"] = True
+            continue
+        i0 = int((pad_s - track.history_start) * SR)
+        i1 = int((pad_e - track.history_start) * SR)
+        piece = track.history_buf[i0:i1]
+        if len(piece) < SR // 2:
+            seg["refined"] = True
+            continue
+        try:
+            res = transcribe_array(piece, cfg, [(0.0, len(piece) / SR, None)], f"{track.name} (уточнение)")
+            new_text = " ".join(x.get("text", "").strip() for x in res).strip()
+            old_text = (seg.get("text") or "").strip()
+            if new_text and len(new_text.split()) >= max(1, int(len(old_text.split()) * 0.65)):
+                if new_text != old_text:
+                    seg["text"] = new_text
+                seg["refined"] = True
+                changed = True
+                refined_this_tick += 1
+        except Exception:  # noqa: BLE001
+            seg["refined"] = True
+    return changed
 
 
 def _step(track: Track, cfg: dict, final: bool = False) -> None:
@@ -389,6 +456,7 @@ def _step(track: Track, cfg: dict, final: bool = False) -> None:
     new, track.frame = read_new(track.path, track.frame)
     if new is not None:
         track.buf = new if track.buf is None else np.concatenate([track.buf, new])
+        track.append_history(new)
     if track.buf is None or len(track.buf) < int(SR * 3.5):
         return
     window = len(track.buf) / SR - (0 if final else TAIL_GUARD)
@@ -397,14 +465,16 @@ def _step(track: Track, cfg: dict, final: bool = False) -> None:
     regions = [(s, e) for s, e in speech_regions(track.buf[: int(window * SR)], cfg)]
     if not final:  # фраза у края окна может продолжаться — её оставим на следующий раз
         regions = [(s, e) for s, e in regions if e < window - 0.4]
+    cfg = dict(cfg, meeting={"participants": participants.read(track.work)})
     if not regions:
+        did_refine = _refine_delayed(track, cfg)
         if window > 25:  # долгая тишина — сдвигаем начало, чтобы буфер не рос
             cut = window - 2
             track.buf, track.until = track.buf[int(cut * SR):], track.until + cut
             track.save()
+        elif did_refine:
+            track.save()
         return
-    # Свежий список участников текущей встречи — в подсказку Whisper и сопоставление голосов.
-    cfg = dict(cfg, meeting={"participants": participants.read(track.work)})
     p = TRACKS[track.name]
     chunks = [(s, e, None) for s, e in _chunks(regions, p["gap"], p["max"]) if e - s >= 0.3]
     segs = transcribe_array(track.buf, cfg, chunks, f"{track.name} (по ходу встречи)")
@@ -419,6 +489,7 @@ def _step(track: Track, cfg: dict, final: bool = False) -> None:
     if track.name == "others" and track.tracker is not None and segs:
         track.tracker.assign(track.segments, segs, raw_spans, track.buf, cfg)
     track.segments += segs
+    _refine_delayed(track, cfg)
     cut = regions[-1][1] if not final else window
     track.buf, track.until = track.buf[int(cut * SR):], track.until + cut
     track.save()

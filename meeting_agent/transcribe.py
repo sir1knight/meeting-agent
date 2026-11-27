@@ -37,6 +37,8 @@ def transcribe_array(wav, cfg: dict, regions: list[tuple[float, float, str]] | N
     log.info("Расшифровка %s (%s, %s)…", name, models.ASR_ENGINES[engine]["title"], how)
     if engine == "gigaam":
         return transcribe_gigaam(wav, cfg, regions)
+    if engine == "apple-speech":
+        return transcribe_apple_speech(wav, cfg, regions)
     if regions is not None:
         return transcribe_whisper_regions(wav, cfg, regions)
     return transcribe_whisper(wav, cfg)
@@ -263,6 +265,9 @@ def _speech_regions(wav, cfg: dict) -> list[tuple[float, float]]:
     """Где в записи речь. pyannote (если есть и скачан), иначе — по громкости."""
     from . import models
 
+    if models.diarization_engine(cfg) == "wespeaker":
+        return _energy_regions(wav)
+
     try:
         if not models.pyannote_installed():
             raise ImportError
@@ -352,4 +357,55 @@ def transcribe_gigaam(wav, cfg: dict, regions=None) -> list[dict]:
                     if label:
                         seg["spk"] = label
                     out.append(seg)
+    return out
+
+
+def transcribe_apple_speech(wav, cfg: dict, regions=None) -> list[dict]:
+    """Системное распознавание macOS: SpeechAnalyzer / DictationTranscriber (macOS 26+)
+    или SFSpeechRecognizer (macOS 13–15)."""
+    import json
+    import subprocess
+    import tempfile
+
+    import soundfile as sf
+
+    from . import models
+
+    exe = models.applespeech_bin()
+    if not exe:
+        raise RuntimeError("Встроенный модуль Apple Speech не найден в сборке приложения")
+    lang = cfg["whisper"].get("language") or "ru"
+    locale = "ru-RU" if lang == "ru" else ("en-US" if lang == "en" else lang)
+    prompt = _whisper_prompt(cfg) or ""
+    if regions is not None:
+        chunks = [r for r in regions if r[1] - r[0] >= REGION_MIN]
+    else:
+        chunks = [(s, e, None) for s, e in _chunks(_speech_regions(wav, cfg), join_gap=1.0, chunk_max=45.0)
+                  if e - s >= 0.3]
+    out = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for idx, (s, e, label) in enumerate(chunks):
+            piece = wav[int(s * SR):int(e * SR)]
+            if len(piece) < int(REGION_MIN * SR):
+                continue
+            wav_path = Path(tmp) / f"c{idx}.wav"
+            sf.write(str(wav_path), piece, SR, subtype="PCM_16")
+            cmd = [str(exe), str(wav_path), f"--lang={locale}"]
+            if prompt:
+                cmd.append(f"--hints={prompt[:1500]}")
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            if r.returncode != 0:
+                try:
+                    err = json.loads(r.stdout or "{}").get("error") or r.stderr.strip()
+                except ValueError:
+                    err = r.stderr.strip() or f"код {r.returncode}"
+                raise RuntimeError(f"Apple Speech: {err}")
+            data = json.loads(r.stdout or "{}")
+            texts = [seg.get("text", "").strip() for seg in data.get("segments", []) if seg.get("text", "").strip()]
+            text = " ".join(texts).strip()
+            if text:
+                seg = {"start": round(s, 2), "end": round(e, 2), "text": text}
+                if label:
+                    seg["spk"] = label
+                out.append(seg)
     return out

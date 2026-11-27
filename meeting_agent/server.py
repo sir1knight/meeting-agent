@@ -219,7 +219,7 @@ def voices_status(cfg: dict) -> tuple[bool, str]:
                        "Пересоберите приложение: ./build_app.sh — пакеты из requirements-diarization.txt входят в сборку.")
     if not cfg["diarization"].get("enabled"):
         return False, "Включите «Разделять собеседников по голосам» в Настройках."
-    if not config.hf_token(cfg):
+    if models.diarization_engine(cfg) != "wespeaker" and not config.hf_token(cfg):
         return False, ("Нужен бесплатный токен Hugging Face: Настройки → Разделение собеседников. "
                        "Он нужен один раз, чтобы скачать модель; дальше всё работает без интернета.")
     if not models.is_ready("diarization", cfg):
@@ -294,6 +294,17 @@ def get_settings(cfg: dict) -> dict:
         "keep_audio": cfg["output"].get("keep_audio", True),
         "compress_audio": cfg["output"].get("compress_audio", True),
         "diarization_enabled": cfg["diarization"].get("enabled", True),
+        "diarization_engine": models.diarization_engine(cfg),
+        "diarization_engines": {
+            k: {
+                "title": v["title"],
+                "desc": v["desc"],
+                "size": v["size"],
+                "requires_token": v["requires_token"],
+                "ready": models.diarization_ready(cfg, k),
+            }
+            for k, v in models.DIARIZATION_ENGINES.items()
+        },
         "voices_enabled": cfg["voices"].get("enabled", True),
         "names_guess": cfg["names"].get("guess", True),
         "live_enabled": cfg.get("live", {}).get("enabled", True),
@@ -358,6 +369,8 @@ def save_settings(data: dict) -> None:
         put("ask", "backend", data["ask_backend"])
     if data.get("asr_engine") in models.ASR_ENGINES:
         put("whisper", "engine", data["asr_engine"])
+    if data.get("diarization_engine") in models.DIARIZATION_ENGINES:
+        put("diarization", "engine", data["diarization_engine"])
     from . import templates as tpl_mod
     if "template" in data and tpl_mod.path(str(data["template"])):
         put("output", "template", data["template"])
@@ -1095,6 +1108,33 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_post_check_hf(self, q):
         self._json(check_hf(config.load()))
+
+    def _sample_wav(self) -> Path:
+        for base in (config.ROOT, Path(os.environ.get("MEETING_AGENT_BUNDLED_ROOT") or config.ROOT)):
+            p = base / "meeting_agent" / "resources" / "sample_ru.wav"
+            if p.is_file():
+                return p
+        raise LookupError("Тестовый аудиофайл не найден")
+
+    def api_get_setup_sample(self, q):
+        self._wav(self._sample_wav())
+
+    def api_post_setup_test(self, q):
+        """Проверить выбранный движок распознавания речи на встроенной тестовой записи."""
+        from . import transcribe
+
+        cfg = config.load()
+        engine = models.asr_engine(cfg)
+        if not models.engine_ready(cfg, engine):
+            raise ValueError("Сначала скачайте выбранную модель распознавания речи")
+        wav = self._sample_wav()
+        t0 = time.monotonic()
+        segs = transcribe.transcribe(wav, cfg)
+        dt = round(time.monotonic() - t0, 2)
+        text = " ".join(s.get("text", "").strip() for s in segs if s.get("text", "").strip()).strip()
+        if not text:
+            raise RuntimeError("Речь на тестовой записи не распозналась")
+        self._json({"ok": True, "text": text, "engine": models.ASR_ENGINES[engine]["title"], "seconds": dt})
 
     def api_post_models_download(self, q):
         name = self._data().get("name")

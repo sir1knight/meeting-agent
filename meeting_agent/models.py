@@ -34,6 +34,14 @@ ASR_ENGINES = {
                "size": 0.45e9, "desc": "Обучен на русской речи, в том числе на созвонах и шумной речи. "
                                       "Сам расставляет знаки препинания. Только русский язык."},
 }
+if not IS_WIN:
+    ASR_ENGINES["apple-speech"] = {
+        "title": "Apple Speech (встроенное в macOS)",
+        "repo": "",
+        "size": 0,
+        "desc": "Системное распознавание Apple (SpeechAnalyzer / DictationTranscriber на macOS 26+). "
+                "Ничего не скачивает и бережёт батарею.",
+    }
 if IS_WIN:
     ASR_ENGINES["whisper-turbo"].update(
         repo="deepdml/faster-whisper-large-v3-turbo-ct2",
@@ -86,13 +94,13 @@ CATALOG = {
     "whisper": {"title": "Распознавание речи", "size": 1.6e9, "required": True},
     "llm": {"title": "Языковая модель для протоколов (Qwen 2.5 7B)", "size": 4.7e9 if IS_WIN else 4.3e9,
             "required": False},
-    "diarization": {"title": "Разделение собеседников (pyannote)", "size": 0.03e9, "required": False},
+    "diarization": {"title": "Разделение собеседников", "size": 0.03e9, "required": False},
 }
 
 
 def repo_for(name: str, cfg: dict) -> str:
-    return {"whisper": asr_repo(cfg), "llm": llm_repo(cfg),
-            "diarization": cfg["diarization"]["model"]}[name]
+    diar_repo = WESPEAKER_REPO if diarization_engine(cfg) == "wespeaker" else cfg["diarization"]["model"]
+    return {"whisper": asr_repo(cfg), "llm": llm_repo(cfg), "diarization": diar_repo}[name]
 
 
 def local_dir(repo: str) -> Path:
@@ -138,16 +146,45 @@ def _hf_cache_snapshot(repo: str) -> Path | None:
 
 # Пайплайн 3.1 и модели, на которые ссылается его config.yaml.
 PYANNOTE_PARTS = ("pyannote/segmentation-3.0", "pyannote/wespeaker-voxceleb-resnet34-LM")
+WESPEAKER_REPO = "pyannote/wespeaker-voxceleb-resnet34-LM"
+
+DIARIZATION_ENGINES = {
+    "wespeaker": {
+        "title": "WeSpeaker (локально, без токена Hugging Face)",
+        "desc": "Открытая модель ResNet34-LM (~27 МБ) + локальный VAD и кластеризация. Не требует регистрации и токена Hugging Face.",
+        "size": 0.027e9,
+        "repo": WESPEAKER_REPO,
+        "requires_token": False,
+    },
+    "pyannote": {
+        "title": "pyannote (Hugging Face, нужен токен)",
+        "desc": "Нейросетевая сегментация речи pyannote 3.1 (~30 МБ). Точнее на перекрывающейся речи, но требует бесплатный токен Hugging Face.",
+        "size": 0.03e9,
+        "repo": "pyannote/speaker-diarization-3.1",
+        "requires_token": True,
+    },
+}
 
 
-def _pyannote_ready(cfg: dict) -> bool:
+def diarization_engine(cfg: dict) -> str:
+    e = cfg.get("diarization", {}).get("engine", "pyannote")
+    return e if e in DIARIZATION_ENGINES else "pyannote"
+
+
+def diarization_ready(cfg: dict, engine: str | None = None) -> bool:
     from huggingface_hub.constants import HF_HUB_CACHE
 
-    for repo in (cfg["diarization"]["model"], *PYANNOTE_PARTS):
+    eng = engine or diarization_engine(cfg)
+    repos = (WESPEAKER_REPO,) if eng == "wespeaker" else (cfg["diarization"]["model"], *PYANNOTE_PARTS)
+    for repo in repos:
         d = Path(HF_HUB_CACHE) / ("models--" + repo.replace("/", "--"))
         if not (d / "refs" / "main").exists():
             return False
     return True
+
+
+def _pyannote_ready(cfg: dict) -> bool:
+    return diarization_ready(cfg)
 
 
 def pyannote_installed() -> bool:
@@ -156,9 +193,21 @@ def pyannote_installed() -> bool:
     return importlib.util.find_spec("pyannote.audio") is not None
 
 
+def applespeech_bin() -> Path | None:
+    if IS_WIN:
+        return None
+    for base in (config.ROOT, Path(os.environ.get("MEETING_AGENT_BUNDLED_ROOT") or config.ROOT), config.HOME):
+        p = base / "bin" / "applespeech"
+        if p.is_file() and os.access(p, os.X_OK):
+            return p
+    return None
+
+
 def is_ready(name: str, cfg: dict) -> bool:
     if name == "diarization":
         return _pyannote_ready(cfg)
+    if name == "whisper" and asr_engine(cfg) == "apple-speech":
+        return applespeech_bin() is not None
     repo = repo_for(name, cfg)
     if (local_dir(repo) / COMPLETE).exists():
         return True
@@ -175,7 +224,9 @@ def needed(cfg: dict) -> list[str]:
     names = ["whisper"]
     if cfg["llm"].get("backend", "local") == "local":
         names.append("llm")
-    if cfg["diarization"].get("enabled") and config.hf_token(cfg):
+    if cfg["diarization"].get("enabled") and (
+        diarization_engine(cfg) == "wespeaker" or config.hf_token(cfg)
+    ):
         names.append("diarization")
     return names
 
@@ -213,12 +264,17 @@ class Downloader:
             ready = is_ready(name, cfg)
             if ready and st.get("status") != "error":
                 st = {"status": "ready"}
-            size = ASR_ENGINES[asr_engine(cfg)]["size"] if name == "whisper" else info["size"]
-            if not ready and not st and name in PAUSABLE:
+            size = (ASR_ENGINES[asr_engine(cfg)]["size"] if name == "whisper"
+                    else DIARIZATION_ENGINES[diarization_engine(cfg)]["size"] if name == "diarization"
+                    else info["size"])
+            if not ready and not st and name in PAUSABLE and size > 0:
                 part = _partial_bytes(repo_for(name, cfg))
                 if part:  # начатая раньше загрузка — можно продолжить
                     st = {"status": "paused", "done": part, "total": max(size, part)}
-            title = info["title"] + (f" — {ASR_ENGINES[asr_engine(cfg)]['title']}" if name == "whisper" else "")
+            suffix = (f" — {ASR_ENGINES[asr_engine(cfg)]['title']}" if name == "whisper"
+                      else f" — {DIARIZATION_ENGINES[diarization_engine(cfg)]['title']}" if name == "diarization"
+                      else "")
+            title = info["title"] + suffix
             out[name] = {"title": title, "required": name in needed(cfg),
                          "status": st.get("status", "ready" if ready else "missing"),
                          "done": st.get("done", 0), "total": st.get("total", size),
@@ -235,7 +291,11 @@ class Downloader:
         with self.lock:
             if self.state.get(name, {}).get("status") == "downloading":
                 return
-            size = ASR_ENGINES[asr_engine(cfg)]["size"] if name == "whisper" else CATALOG[name]["size"]
+            size = (ASR_ENGINES[asr_engine(cfg)]["size"] if name == "whisper"
+                    else DIARIZATION_ENGINES[diarization_engine(cfg)]["size"] if name == "diarization"
+                    else CATALOG[name]["size"])
+            if is_ready(name, cfg) or size <= 0:
+                return
             done = _partial_bytes(repo_for(name, cfg)) if name in PAUSABLE else 0
             self.state[name] = {"status": "downloading", "done": done, "total": max(size, done),
                                 "repo": repo_for(name, cfg), "speed": 0, "_mark": (time.time(), done)}
@@ -300,13 +360,23 @@ class Downloader:
         (dest / COMPLETE).write_text(time.strftime("%Y-%m-%d %H:%M"))
 
     def _pyannote(self, cfg: dict) -> None:
-        """Скачивает пайплайн 3.1 и его модели целиком (в pyannote 4.x Pipeline.from_pretrained
-        для 3.1 ещё и требует доступ к speaker-diarization-community-1 — он не нужен)."""
+        """Скачивает модель разделения собеседников: открытую WeSpeaker (без токена) или pyannote 3.1."""
+        eng = diarization_engine(cfg)
+        if not pyannote_installed():
+            raise RuntimeError("В этой сборке нет модуля разделения собеседников: пересоберите приложение с requirements-diarization.txt")
+        if eng == "wespeaker":
+            env = dict(os.environ, HF_HUB_OFFLINE="0")
+            code = ("import sys\n"
+                    "from huggingface_hub import snapshot_download\n"
+                    "snapshot_download(sys.argv[1], token=False)\n")
+            r = subprocess.run([sys_executable(), "-c", code, WESPEAKER_REPO], env=env, capture_output=True, text=True)
+            if r.returncode != 0:
+                err = (r.stderr.strip().splitlines() or ["проверьте интернет"])[-1]
+                raise RuntimeError(f"Не удалось скачать модель WeSpeaker: {err}")
+            return
         token = config.hf_token(cfg)
         if not token:
             raise RuntimeError("Сначала введите токен Hugging Face в настройках")
-        if not pyannote_installed():
-            raise RuntimeError("В этой сборке нет pyannote: пересоберите приложение с requirements-diarization.txt")
         # Отдельный процесс: у сервера включён офлайн-режим Hugging Face.
         env = dict(os.environ, HF_HUB_OFFLINE="0", HF_TOKEN=token)
         code = ("import os, sys\n"

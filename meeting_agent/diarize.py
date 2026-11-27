@@ -53,9 +53,163 @@ def _load_pipeline(cfg: dict):
     return pipe, params.get("embedding") or EMBEDDING_FALLBACK
 
 
+def _emb_token(repo: str, cfg: dict):
+    return False if repo == EMBEDDING_FALLBACK else hf_token(cfg)
+
+
+def _energy_vad_chunks(mono, sr: int) -> list[tuple[float, float]]:
+    """Быстрый локальный VAD по энергии сигнала с нарезкой длинных фраз на 3-секундные окна."""
+    import numpy as np
+
+    hop = max(1, int(0.03 * sr))
+    n = len(mono) // hop
+    if not n:
+        return []
+    frames = mono[: n * hop].reshape(n, hop)
+    rms = np.sqrt(np.mean(frames ** 2, axis=1))
+    noise = float(np.percentile(rms, 20))
+    thr = max(0.006, noise * 2.8)
+    active = rms > thr
+
+    raw: list[tuple[float, float]] = []
+    start = None
+    for i, on in enumerate(active):
+        t = i * hop / sr
+        if on and start is None:
+            start = t
+        elif not on and start is not None:
+            if raw and start - raw[-1][1] < 0.35:
+                raw[-1] = (raw[-1][0], t)
+            else:
+                raw.append((start, t))
+            start = None
+    if start is not None:
+        t = n * hop / sr
+        if raw and start - raw[-1][1] < 0.35:
+            raw[-1] = (raw[-1][0], t)
+        else:
+            raw.append((start, t))
+
+    chunks: list[tuple[float, float]] = []
+    for s, e in raw:
+        if e - s < 0.75:
+            continue
+        cur = s
+        while e - cur > 4.0:
+            chunks.append((round(cur, 3), round(cur + 3.0, 3)))
+            cur += 3.0
+        if e - cur >= 0.75:
+            chunks.append((round(cur, 3), round(e, 3)))
+        elif chunks and chunks[-1][1] == round(cur, 3):
+            chunks[-1] = (chunks[-1][0], round(e, 3))
+    return chunks
+
+
+def _diarize_wespeaker(path: Path, cfg: dict, samples_dir: Path | None = None
+                       ) -> tuple[list[tuple[float, float, str]], dict[str, Speaker]]:
+    """Локальное разделение собеседников через WeSpeaker ResNet34-LM без токена Hugging Face."""
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from pyannote.audio import Inference, Model
+    from sklearn.cluster import AgglomerativeClustering
+
+    d = cfg["diarization"]
+    device = osutil.torch_device(d.get("device"))
+    data, sr = sf.read(str(path), dtype="float32", always_2d=True)
+    mono = data.mean(axis=1)
+    if sr != 16000 and len(mono) > 1:
+        n_new = int(round(len(mono) * 16000 / sr))
+        mono = np.interp(np.linspace(0, len(mono) - 1, n_new), np.arange(len(mono)), mono).astype("float32")
+        sr = 16000
+
+    chunks = _energy_vad_chunks(mono, sr)
+    if not chunks:
+        return [], {}
+
+    log.info("Разделение собеседников через локальный WeSpeaker (%d фрагм.)…", len(chunks))
+    model = Model.from_pretrained(EMBEDDING_FALLBACK, token=False)
+    infer = Inference(model, window="whole")
+    infer.to(device)
+
+    embs, valid = [], []
+    for s, e in chunks:
+        piece = mono[int(s * sr):int(e * sr)]
+        if len(piece) < sr // 2:
+            continue
+        v = np.asarray(infer({"waveform": torch.from_numpy(piece[None].copy()), "sample_rate": sr}), dtype="float32")
+        norm = float(np.linalg.norm(v))
+        if np.all(np.isfinite(v)) and norm > 0:
+            embs.append(v / norm)
+            valid.append((s, e))
+
+    if not valid:
+        return [], {}
+
+    if len(valid) == 1:
+        labels = [0]
+    else:
+        X = np.vstack(embs)
+        min_k = int(d.get("min_speakers") or 0)
+        max_k = int(d.get("max_speakers") or 0)
+        from .participants import of
+        listed = len(of(cfg))
+        if listed >= 3 and min_k == 0:
+            min_k = listed - 1
+        cl = AgglomerativeClustering(n_clusters=None, metric="cosine", linkage="average", distance_threshold=0.45)
+        labels = cl.fit_predict(X).tolist()
+        k = len(set(labels))
+        if min_k > 1 and k < min_k <= len(valid):
+            labels = AgglomerativeClustering(n_clusters=min_k, metric="cosine", linkage="average").fit_predict(X).tolist()
+        elif max_k >= 1 and k > max_k:
+            labels = AgglomerativeClustering(n_clusters=max_k, metric="cosine", linkage="average").fit_predict(X).tolist()
+
+    # Стабильная нумерация по порядку первого появления: SPEAKER_00, SPEAKER_01…
+    remap: dict[int, str] = {}
+    turns: list[tuple[float, float, str]] = []
+    by_spk: dict[str, list[np.ndarray]] = {}
+    for (s, e), raw_lbl, vec in zip(valid, labels, embs):
+        if raw_lbl not in remap:
+            remap[raw_lbl] = f"SPEAKER_{len(remap):02d}"
+        lbl = remap[raw_lbl]
+        by_spk.setdefault(lbl, []).append(vec)
+        if turns and turns[-1][2] == lbl and s - turns[-1][1] <= 0.6:
+            turns[-1] = (turns[-1][0], e, lbl)
+        else:
+            turns.append((s, e, lbl))
+
+    speakers: dict[str, Speaker] = {}
+    for lbl, vecs in by_spk.items():
+        sp_turns = [(s, e) for s, e, k in turns if k == lbl]
+        mean_v = np.mean(np.vstack(vecs), axis=0)
+        norm = float(np.linalg.norm(mean_v))
+        emb = (mean_v / norm).round(6).tolist() if norm > 0 else None
+        speakers[lbl] = Speaker(
+            label=lbl,
+            duration=round(sum(e - s for s, e in sp_turns), 1),
+            embedding=emb,
+            segments=sp_turns,
+        )
+
+    if samples_dir is not None:
+        try:
+            _write_samples(mono, sr, speakers, _NoOverlap(), EMBEDDING_FALLBACK, cfg, device, samples_dir)
+        except Exception as e:
+            log.warning("Не удалось сохранить образцы голоса: %s", e)
+
+    del infer, model
+    osutil.empty_cache(device)
+    return turns, speakers
+
+
 def diarize(path: Path, cfg: dict, samples_dir: Path | None = None
             ) -> tuple[list[tuple[float, float, str]], dict[str, Speaker]]:
     """Возвращает (реплики (начало, конец, метка), {метка: Speaker})."""
+    from . import models
+
+    if models.diarization_engine(cfg) == "wespeaker":
+        return _diarize_wespeaker(path, cfg, samples_dir)
+
     import numpy as np
     import soundfile as sf
     import torch
@@ -127,7 +281,7 @@ def _write_samples(mono, sr: int, speakers: dict[str, Speaker], annotation, embe
     import torch
     from pyannote.audio import Inference, Model
 
-    model = Model.from_pretrained(embedding_name, token=hf_token(cfg))
+    model = Model.from_pretrained(embedding_name, token=_emb_token(embedding_name, cfg))
     infer = Inference(model, window="whole")
     infer.to(device)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -206,7 +360,7 @@ def refresh_speakers(path: Path, intervals: dict[str, list[tuple[float, float]]]
     data, sr = sf.read(str(path), dtype="float32", always_2d=True)
     mono = data.mean(axis=1)
     device = osutil.torch_device(cfg["diarization"].get("device"))
-    infer = Inference(Model.from_pretrained(EMBEDDING_FALLBACK, token=hf_token(cfg)), window="whole")
+    infer = Inference(Model.from_pretrained(EMBEDDING_FALLBACK, token=False), window="whole")
     infer.to(device)
     speakers: dict[str, Speaker] = {}
     for label, segs in intervals.items():
@@ -245,7 +399,7 @@ def refine(path: Path, segments: list[dict], speakers: dict[str, Speaker], cfg: 
     mono, sr = sf.read(str(path), dtype="float32", always_2d=True)
     mono = mono.mean(axis=1)
     device = osutil.torch_device(d.get("device"))
-    infer = Inference(Model.from_pretrained(EMBEDDING_FALLBACK, token=hf_token(cfg)), window="whole")
+    infer = Inference(Model.from_pretrained(EMBEDDING_FALLBACK, token=False), window="whole")
     infer.to(device)
     changed: set[str] = set()
     moved = 0

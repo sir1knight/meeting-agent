@@ -77,6 +77,11 @@ rm -rf "${APP}"
 mkdir -p "${APP}/Contents/MacOS" "${RES}/app"
 [[ ${THIN} == 0 ]] && cp -cR "${ENV}" "${RES}/python"
 cp -R meeting_agent templates ui config.toml requirements-mac.lock "${RES}/app/"
+mkdir -p "${RES}/app/bin"
+if [[ -f recorder/AppleSpeech.swift ]]; then
+  say "Компилирую Apple Speech (SpeechAnalyzer / DictationTranscriber)"
+  swiftc -O -target arm64-apple-macos13.0 -parse-as-library recorder/AppleSpeech.swift -o "${RES}/app/bin/applespeech" 2>&1 || true
+fi
 # В приложение — version.json без ссылки на само приложение (её контрольная сумма известна только после сборки).
 python3 -c "import json,sys; m=json.load(open('version.json')); m.pop('shell_download', None); json.dump(m, open(sys.argv[1], 'w'), ensure_ascii=False, indent=2)" "${RES}/app/version.json"
 # Версия оболочки (Swift): shell_latest.mac — какая собирается; shell.mac — какая нужна коду (меньше или равна).
