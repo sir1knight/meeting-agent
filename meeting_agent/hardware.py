@@ -12,6 +12,14 @@ import subprocess
 from . import osutil
 
 _info: dict | None = None
+MIN_LOCAL_LLM_RAM_GB = 12
+
+
+def local_llm_supported(hw: dict | None = None) -> bool:
+    """Локальный Qwen 2.5 7B требует от 12 ГБ ОЗУ: на машинах с 8 ГБ его загрузка заблокирована."""
+    hw = hw or info()
+    ram = hw.get("ram_gb") or 0
+    return ram == 0 or ram >= MIN_LOCAL_LLM_RAM_GB
 
 
 def info() -> dict:
@@ -83,7 +91,11 @@ def recommend(hw: dict | None = None) -> dict:
     asr_note = ("GigaAM обучен на русской речи и созвонах: точнее Whisper на русском и быстро работает "
                 "даже на процессоре. Для встреч на других языках выберите Whisper.")
 
-    if big_gpu and ram >= 16:
+    if not local_llm_supported(hw):
+        llm, llm_note = "gemini", (f"На компьютере {ram:.0f} ГБ оперативной памяти — для локального Qwen 2.5 7B "
+                                   "нужно от 12 ГБ. Локальная модель отключена, используйте облачную "
+                                   "(например, GigaChat или Gemini Flash).")
+    elif big_gpu and ram >= 16:
         llm, llm_note = "local", (f"{gpu['name']} ({gpu['vram_gb']:.0f} ГБ) потянет Qwen целиком: протоколы "
                                   "пишутся на этом компьютере за пару минут, ничего не уходит в интернет. "
                                   "Нужно скачать ускорение NVIDIA (шаг ниже).")

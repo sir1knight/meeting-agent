@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -41,6 +42,7 @@ class Jobs:
     def __init__(self):
         self.lock = threading.Lock()
         self.items: list[dict] = []
+        self.procs: dict[str, subprocess.Popen] = {}
         self.wake = threading.Event()
         self.before_run = None  # ждать, пока распознавание по ходу встречи закончит свою часть
         threading.Thread(target=self._loop, daemon=True).start()
@@ -51,7 +53,7 @@ class Jobs:
         folder = folder.resolve()
         with self.lock:
             for j in self.items:  # одну и ту же встречу дважды в очередь не ставим
-                if j["folder"] == str(folder) and j["status"] in ("queued", "running"):
+                if j["folder"] == str(folder) and j["status"] in ("queued", "running", "paused"):
                     return j
             job = {"id": uuid.uuid4().hex[:8], "folder": str(folder), "template": template,
                    "llm": llm, "gemini_model": gemini_model, "model_override": model_override,
@@ -68,7 +70,65 @@ class Jobs:
 
     def dismiss(self, job_id: str) -> None:
         with self.lock:
-            self.items = [j for j in self.items if j["id"] != job_id or j["status"] == "running"]
+            self.items = [j for j in self.items if j["id"] != job_id or j["status"] in ("running", "paused")]
+
+    def pause(self, job_id: str) -> None:
+        with self.lock:
+            job = next((j for j in self.items if j["id"] == job_id), None)
+            proc = self.procs.get(job_id)
+            if not job or job["status"] != "running" or not proc or proc.poll() is not None:
+                return
+            if not osutil.IS_WIN:
+                proc.send_signal(signal.SIGSTOP)
+                job["status"] = "paused"
+            else:
+                job["_pause"] = True
+                proc.terminate()
+                job["status"] = "paused"
+
+    def resume(self, job_id: str) -> None:
+        wake = False
+        with self.lock:
+            job = next((j for j in self.items if j["id"] == job_id), None)
+            if not job or job["status"] != "paused":
+                return
+            proc = self.procs.get(job_id)
+            if not osutil.IS_WIN and proc and proc.poll() is None:
+                proc.send_signal(signal.SIGCONT)
+                job["status"] = "running"
+            else:
+                job.pop("_pause", None)
+                job["status"] = "queued"
+                wake = True
+        if wake:
+            self.wake.set()
+
+    def cancel(self, job_id: str) -> None:
+        with self.lock:
+            job = next((j for j in self.items if j["id"] == job_id), None)
+            if not job:
+                return
+            if job["status"] == "queued":
+                self.items = [j for j in self.items if j["id"] != job_id]
+                return
+            if job["status"] not in ("running", "paused"):
+                return
+            job["_cancel"] = True
+            proc = self.procs.get(job_id)
+        if proc and proc.poll() is None:
+            if not osutil.IS_WIN:
+                try:
+                    proc.send_signal(signal.SIGCONT)
+                except OSError:
+                    pass
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
 
     def _next(self) -> dict | None:
         with self.lock:
@@ -103,19 +163,32 @@ class Jobs:
         log.info("Обработка %s", job["folder"])
         proc = subprocess.Popen(cmd, cwd=config.ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, **osutil.popen_kwargs())
+        with self.lock:
+            self.procs[job["id"]] = proc
         tail: list[str] = []
-        for line in proc.stdout:
-            line = line.rstrip()
-            log.info("  %s", line)
-            m = re.search(r"@stage (\w+)", line)
-            if m:
-                job["stage"] = m.group(1)
-            m = re.search(r"Заметка готова: (.+\.md)$", line)
-            if m:
-                job["note"] = Path(m.group(1)).name
-            tail = (tail + [line])[-30:]
-        rc = proc.wait()
-        if rc == 0:
+        try:
+            for line in proc.stdout:
+                line = line.rstrip()
+                log.info("  %s", line)
+                m = re.search(r"@stage (\w+)", line)
+                if m:
+                    job["stage"] = m.group(1)
+                m = re.search(r"Заметка готова: (.+\.md)$", line)
+                if m:
+                    job["note"] = Path(m.group(1)).name
+                tail = (tail + [line])[-30:]
+            rc = proc.wait()
+        finally:
+            with self.lock:
+                self.procs.pop(job["id"], None)
+        if job.pop("_cancel", False):
+            job["status"] = "cancelled"
+            job["error"] = None
+            log.info("Обработка отменена: %s", job["folder"])
+        elif job.pop("_pause", False):
+            job["status"] = "paused"
+            log.info("Обработка приостановлена: %s", job["folder"])
+        elif rc == 0:
             job["status"] = "done"
         else:
             job["status"] = "error"
@@ -262,6 +335,10 @@ def _with_model(cfg: dict, d: dict) -> dict:
     b = d.get("backend")
     if b not in BACKENDS:
         return cfg
+    if b == "local":
+        from . import hardware
+        if not hardware.local_llm_supported():
+            raise ValueError("Локальная модель Qwen недоступна при 8 ГБ оперативной памяти (нужно от 12 ГБ)")
     ask = dict(cfg.get("ask", {}), backend=b)
     if b == "gemini" and d.get("gemini_model"):
         ask["gemini_model"] = _gemini_model(str(d["gemini_model"]))
@@ -276,12 +353,26 @@ def _template_backend(cfg: dict) -> str | None:
 
 def get_settings(cfg: dict) -> dict:
     from . import ask as ask_mod
-
+    from . import hardware
     from . import templates as tpl_mod
 
+    hw = hardware.info()
+    local_ok = hardware.local_llm_supported(hw)
+    llm_backend = cfg["llm"].get("backend", "local")
+    if not local_ok and llm_backend == "local":
+        llm_backend = next(
+            (b for b, ok in (("gigachat", config.gigachat_key(cfg)),
+                             ("gemini", config.read_secret("gemini_key")),
+                             ("claude", config.anthropic_key(cfg)),
+                             ("openai", config.openai_key(cfg)),
+                             ("claude-code", claude_cli())) if ok),
+            "gigachat",
+        )
     templates = tpl_mod.list_all()
     return {
-        "llm_backend": cfg["llm"].get("backend", "local"),
+        "llm_backend": llm_backend,
+        "local_llm_supported": local_ok,
+        "ram_gb": hw.get("ram_gb", 0),
         "backends": BACKENDS,
         "asr_engine": models.asr_engine(cfg),
         "asr_engines": {k: {"title": v["title"], "desc": v["desc"], "size": v["size"],
@@ -363,9 +454,17 @@ def save_settings(data: dict) -> None:
         changes.setdefault(section, {})[key] = value
 
     if data.get("llm_backend") in BACKENDS:
+        if data["llm_backend"] == "local":
+            from . import hardware
+            if not hardware.local_llm_supported():
+                raise ValueError("Локальная модель Qwen недоступна при 8 ГБ оперативной памяти (нужно от 12 ГБ)")
         put("llm", "backend", data["llm_backend"])
     from .ask import BACKENDS as ASK_BACKENDS
     if data.get("ask_backend") == "" or data.get("ask_backend") in ASK_BACKENDS:
+        if data.get("ask_backend") == "local":
+            from . import hardware
+            if not hardware.local_llm_supported():
+                raise ValueError("Локальная модель Qwen недоступна при 8 ГБ оперативной памяти (нужно от 12 ГБ)")
         put("ask", "backend", data["ask_backend"])
     if data.get("asr_engine") in models.ASR_ENGINES:
         put("whisper", "engine", data["asr_engine"])
@@ -732,12 +831,28 @@ class Handler(BaseHTTPRequestHandler):
         self.state.jobs.dismiss(self._data().get("id", ""))
         self._json({"ok": True})
 
+    def api_post_jobs_pause(self, q):
+        self.state.jobs.pause(self._data().get("id", ""))
+        self._json({"ok": True})
+
+    def api_post_jobs_resume(self, q):
+        self.state.jobs.resume(self._data().get("id", ""))
+        self._json({"ok": True})
+
+    def api_post_jobs_cancel(self, q):
+        self.state.jobs.cancel(self._data().get("id", ""))
+        self._json({"ok": True})
+
     def api_post_jobs_retry(self, q):
         data = self._data()
         job = next((j for j in self.state.jobs.snapshot() if j["id"] == data.get("id")), None)
         if not job:
             raise LookupError("Задача не найдена")
         llm = data["llm"] if data.get("llm") in BACKENDS else job["llm"]
+        if llm == "local":
+            from . import hardware
+            if not hardware.local_llm_supported():
+                raise ValueError("Локальная модель Qwen недоступна при 8 ГБ оперативной памяти (нужно от 12 ГБ)")
         self.state.jobs.dismiss(job["id"])
         self._json(self.state.jobs.add(Path(job["folder"]), job["template"], llm, job["retranscribe"],
                                        job.get("asr")))

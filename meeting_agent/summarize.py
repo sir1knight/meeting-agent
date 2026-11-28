@@ -546,13 +546,22 @@ def _norm_giga_key(raw: str) -> str:
     return re.sub(r"\s+", "", val)
 
 
+_giga_verify: bool = True
+
+
 def _giga_http(method: str, url: str, **kw) -> requests.Response:
     """Шлюзы Сбера (*.devices.sberbank.ru) используют корневой сертификат Минцифры РФ, которого нет
-    в стандартном бандле certifi. Сначала пробуем со стандартной проверкой, а при SSLError повторяем
-    с verify=False, чтобы GigaChat работал из коробки на любом Mac и Windows."""
-    try:
+    в стандартном бандле certifi. При первом SSLError переключаемся на verify=False без лишних повторов."""
+    global _giga_verify
+    if not _giga_verify:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        kw["verify"] = False
         return _http(method, url, **kw)
+    try:
+        return requests.request(method, url, timeout=kw.pop("timeout", 120), **kw)
     except requests.exceptions.SSLError:
+        _giga_verify = False
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         kw["verify"] = False
@@ -741,7 +750,11 @@ def _api_error(r: requests.Response) -> str:
 
 def chat_local(cfg: dict, user: str, system: str = SYSTEM) -> str:
     """Один запрос к локальной модели (без сервера и без сети): MLX на Mac, llama.cpp на Windows."""
+    from . import hardware
     from .models import llm_repo, require
+
+    if not hardware.local_llm_supported():
+        raise RuntimeError("Локальная модель Qwen отключена на устройствах с 8 ГБ оперативной памяти (нужно от 12 ГБ). Выберите облачную модель в Настройках.")
 
     llm = cfg["llm"]
     if IS_WIN:

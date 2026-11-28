@@ -171,14 +171,18 @@ def diarization_engine(cfg: dict) -> str:
     return e if e in DIARIZATION_ENGINES else "pyannote"
 
 
-def diarization_ready(cfg: dict, engine: str | None = None) -> bool:
-    from huggingface_hub.constants import HF_HUB_CACHE
+def diarization_local_path(repo: str) -> str:
+    """Локальный путь к снапшоту модели диаризации в кэше HF (или имя repo, если кэша нет)."""
+    snap = _hf_cache_snapshot(repo)
+    return str(snap) if snap else repo
 
+
+def diarization_ready(cfg: dict, engine: str | None = None) -> bool:
     eng = engine or diarization_engine(cfg)
     repos = (WESPEAKER_REPO,) if eng == "wespeaker" else (cfg["diarization"]["model"], *PYANNOTE_PARTS)
     for repo in repos:
-        d = Path(HF_HUB_CACHE) / ("models--" + repo.replace("/", "--"))
-        if not (d / "refs" / "main").exists():
+        snap = _hf_cache_snapshot(repo)
+        if not snap or not (any(snap.glob("*.bin")) or any(snap.glob("*.safetensors")) or (snap / "config.yaml").is_file()):
             return False
     return True
 
@@ -221,8 +225,10 @@ def _has_weights(d: Path) -> bool:
 
 def needed(cfg: dict) -> list[str]:
     """Какие модели нужны при текущих настройках."""
+    from . import hardware
+
     names = ["whisper"]
-    if cfg["llm"].get("backend", "local") == "local":
+    if cfg["llm"].get("backend", "local") == "local" and hardware.local_llm_supported():
         names.append("llm")
     if cfg["diarization"].get("enabled") and (
         diarization_engine(cfg) == "wespeaker" or config.hf_token(cfg)
@@ -288,6 +294,10 @@ class Downloader:
             ev.set()
 
     def start(self, name: str, cfg: dict) -> None:
+        if name == "llm":
+            from . import hardware
+            if not hardware.local_llm_supported():
+                raise ValueError("Локальная модель Qwen недоступна при 8 ГБ оперативной памяти (нужно от 12 ГБ). Выберите облачную модель.")
         with self.lock:
             if self.state.get(name, {}).get("status") == "downloading":
                 return

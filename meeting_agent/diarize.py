@@ -127,8 +127,10 @@ def _diarize_wespeaker(path: Path, cfg: dict, samples_dir: Path | None = None
     if not chunks:
         return [], {}
 
+    from . import models
+
     log.info("Разделение собеседников через локальный WeSpeaker (%d фрагм.)…", len(chunks))
-    model = Model.from_pretrained(EMBEDDING_FALLBACK, token=False)
+    model = Model.from_pretrained(models.diarization_local_path(EMBEDDING_FALLBACK), token=False)
     infer = Inference(model, window="whole")
     infer.to(device)
 
@@ -150,19 +152,68 @@ def _diarize_wespeaker(path: Path, cfg: dict, samples_dir: Path | None = None
         labels = [0]
     else:
         X = np.vstack(embs)
+        durs = np.array([e - s for s, e in valid], dtype="float32")
         min_k = int(d.get("min_speakers") or 0)
         max_k = int(d.get("max_speakers") or 0)
         from .participants import of
         listed = len(of(cfg))
         if listed >= 3 and min_k == 0:
             min_k = listed - 1
-        cl = AgglomerativeClustering(n_clusters=None, metric="cosine", linkage="average", distance_threshold=0.45)
-        labels = cl.fit_predict(X).tolist()
-        k = len(set(labels))
-        if min_k > 1 and k < min_k <= len(valid):
+
+        def _cent(idxs: list[int]) -> np.ndarray:
+            w = durs[idxs][:, None]
+            v = (X[idxs] * w).sum(axis=0)
+            return v / (float(np.linalg.norm(v)) + 1e-9)
+
+        # Короткие реплики (< 2 с) не создают отдельные кластеры, чтобы не дробить говорящих на сотни меток.
+        long_idx = [i for i, dur in enumerate(durs) if dur >= 2.0]
+        if len(long_idx) < 2:
+            long_idx = list(range(len(valid)))
+
+        cl = AgglomerativeClustering(n_clusters=None, metric="cosine", linkage="average", distance_threshold=0.60)
+        raw_lbls = cl.fit_predict(X[long_idx]).tolist()
+        clusters: dict[int, list[int]] = {}
+        for idx, lbl_id in zip(long_idx, raw_lbls):
+            clusters.setdefault(int(lbl_id), []).append(idx)
+
+        # Мелкие кластеры (< 6 с речи) и короткие фрагменты присоединяем к ближайшему крупному кластеру.
+        big = {k: idxs for k, idxs in clusters.items() if float(durs[idxs].sum()) >= 6.0}
+        if not big:
+            big = clusters
+        small = [idx for k, idxs in clusters.items() if k not in big for idx in idxs]
+        long_set = set(long_idx)
+        small.extend(i for i in range(len(valid)) if i not in long_set)
+
+        big_keys = list(big.keys())
+        if small:
+            C_big = np.vstack([_cent(big[k]) for k in big_keys])
+            for idx in small:
+                best = int(np.argmax(C_big @ X[idx]))
+                big[big_keys[best]].append(idx)
+
+        # Склеиваем кластеры с близкими центроидами (расстояние < 0.45) или сверх max_k.
+        merged = list(big.values())
+        while len(merged) > 1:
+            if min_k > 1 and len(merged) <= min_k:
+                break
+            C = np.vstack([_cent(idxs) for idxs in merged])
+            dists = 1.0 - (C @ C.T)
+            np.fill_diagonal(dists, 9.0)
+            i, j = divmod(int(np.argmin(dists)), len(merged))
+            over_max = max_k >= 1 and len(merged) > max_k
+            if not over_max and dists[i, j] >= 0.45:
+                break
+            a, b = min(i, j), max(i, j)
+            merged[a] = merged[a] + merged[b]
+            merged.pop(b)
+
+        if min_k > 1 and len(merged) < min_k <= len(valid):
             labels = AgglomerativeClustering(n_clusters=min_k, metric="cosine", linkage="average").fit_predict(X).tolist()
-        elif max_k >= 1 and k > max_k:
-            labels = AgglomerativeClustering(n_clusters=max_k, metric="cosine", linkage="average").fit_predict(X).tolist()
+        else:
+            labels = [0] * len(valid)
+            for cid, idxs in enumerate(merged):
+                for idx in idxs:
+                    labels[idx] = cid
 
     # Стабильная нумерация по порядку первого появления: SPEAKER_00, SPEAKER_01…
     remap: dict[int, str] = {}
@@ -280,8 +331,9 @@ def _write_samples(mono, sr: int, speakers: dict[str, Speaker], annotation, embe
     import soundfile as sf
     import torch
     from pyannote.audio import Inference, Model
+    from . import models
 
-    model = Model.from_pretrained(embedding_name, token=_emb_token(embedding_name, cfg))
+    model = Model.from_pretrained(models.diarization_local_path(embedding_name), token=_emb_token(embedding_name, cfg))
     infer = Inference(model, window="whole")
     infer.to(device)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -356,11 +408,12 @@ def refresh_speakers(path: Path, intervals: dict[str, list[tuple[float, float]]]
     import soundfile as sf
     import torch
     from pyannote.audio import Inference, Model
+    from . import models
 
     data, sr = sf.read(str(path), dtype="float32", always_2d=True)
     mono = data.mean(axis=1)
     device = osutil.torch_device(cfg["diarization"].get("device"))
-    infer = Inference(Model.from_pretrained(EMBEDDING_FALLBACK, token=False), window="whole")
+    infer = Inference(Model.from_pretrained(models.diarization_local_path(EMBEDDING_FALLBACK), token=False), window="whole")
     infer.to(device)
     speakers: dict[str, Speaker] = {}
     for label, segs in intervals.items():
@@ -389,6 +442,7 @@ def refine(path: Path, segments: list[dict], speakers: dict[str, Speaker], cfg: 
     import soundfile as sf
     import torch
     from pyannote.audio import Inference, Model
+    from . import models
 
     d = cfg["diarization"]
     min_len, min_sim, margin = float(d.get("refine_min_seconds", 1.5)), float(d.get("refine_min_sim", 0.5)), \
@@ -399,7 +453,7 @@ def refine(path: Path, segments: list[dict], speakers: dict[str, Speaker], cfg: 
     mono, sr = sf.read(str(path), dtype="float32", always_2d=True)
     mono = mono.mean(axis=1)
     device = osutil.torch_device(d.get("device"))
-    infer = Inference(Model.from_pretrained(EMBEDDING_FALLBACK, token=False), window="whole")
+    infer = Inference(Model.from_pretrained(models.diarization_local_path(EMBEDDING_FALLBACK), token=False), window="whole")
     infer.to(device)
     changed: set[str] = set()
     moved = 0

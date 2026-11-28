@@ -78,6 +78,7 @@ def _safe_settings(cfg: dict) -> dict:
         "asr_engine": models.asr_engine(cfg),
         "language": cfg.get("whisper", {}).get("language"),
         "diarization_enabled": cfg.get("diarization", {}).get("enabled"),
+        "diarization_engine": models.diarization_engine(cfg),
         "voices_enabled": cfg.get("voices", {}).get("enabled"),
         "live_enabled": cfg.get("live", {}).get("enabled"),
         "keep_audio": cfg.get("output", {}).get("keep_audio"),
@@ -120,10 +121,13 @@ def build_zip(cfg: dict, state_permissions: dict | None = None) -> bytes:
     except (OSError, ValueError):
         pass
 
+    from . import hardware
+
     info = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "os": platform.platform(),
         "machine": platform.machine(),
+        "ram_gb": hardware.info().get("ram_gb", 0),
         "python": sys.version.split()[0],
         "app_version": manifest.get("app"),
         "shell_version": updates.shell_version(),

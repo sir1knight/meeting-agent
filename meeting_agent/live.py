@@ -198,10 +198,11 @@ class LiveSpeakerTracker:
 
         if self._infer is None:
             from pyannote.audio import Inference, Model
+            from . import models
             from .diarize import EMBEDDING_FALLBACK
 
             device = osutil.torch_device(cfg["diarization"].get("device"))
-            model = Model.from_pretrained(EMBEDDING_FALLBACK, token=False)
+            model = Model.from_pretrained(models.diarization_local_path(EMBEDDING_FALLBACK), token=False)
             infer = Inference(model, window="whole")
             infer.to(device)
             self._infer = infer

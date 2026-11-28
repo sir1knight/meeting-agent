@@ -1544,6 +1544,7 @@ $("revealBtn").addEventListener("click", () => api("reveal", { method: "POST", b
 function isBackendReady(s, k) {
   if (!s) return k === "local";
   if (k === "local") {
+    if (s.local_llm_supported === false) return false;
     const m = S.status && S.status.models && S.status.models.llm;
     return !m || m.status === "ready";
   }
@@ -1835,9 +1836,24 @@ function renderJobs() {
         ${cloudErr ? `<button class="link" data-retry-qwen="${j.id}" title="Составить протокол локально на ${PC}">На Qwen</button>` : ""}
         <button class="link" data-dismiss="${j.id}">Скрыть</button></div></div>`;
     }
+    if (j.status === "cancelled") {
+      return `<div class="job"><div class="j-title">Обработка отменена</div>
+        <div class="j-sub">${esc(name)}</div>
+        <div class="j-actions"><button class="link" data-retry="${j.id}">Повторить</button>
+        <button class="link" data-dismiss="${j.id}">Скрыть</button></div></div>`;
+    }
+    if (j.status === "paused") {
+      const stage = (j.stage_title || "Подготовка");
+      return `<div class="job"><div class="j-title">Обработка на паузе</div>
+        <div class="j-sub">${esc(stage)} · ${esc(name)}</div>
+        <div class="j-actions"><button class="link" data-resume="${j.id}">Продолжить</button>
+        <button class="link" data-cancel="${j.id}">Отменить</button></div></div>`;
+    }
     const stage = j.status === "queued" ? "В очереди" : (j.stage_title || "Подготовка") + "…";
     return `<div class="job"><div class="j-title"><span class="spinner"></span>Обработка записи</div>
-      <div class="j-sub">${esc(stage)} · ${esc(name)}</div></div>`;
+      <div class="j-sub">${esc(stage)} · ${esc(name)}</div>
+      <div class="j-actions">${j.status === "running" ? `<button class="link" data-pause="${j.id}">Пауза</button>` : ""}
+      <button class="link" data-cancel="${j.id}">Отменить</button></div></div>`;
   }).join("");
 
   // Готовые и упавшие задачи: обновить список и открытую заметку.
@@ -1865,10 +1881,21 @@ $("jobs").addEventListener("click", async (e) => {
     pollStatus();
     return;
   }
-  const id = e.target.dataset.retry || e.target.dataset.dismiss;
-  if (!id) return;
-  await api(e.target.dataset.retry ? "jobs/retry" : "jobs/dismiss", { method: "POST", body: { id } }).catch((err) => toast(err.message));
-  pollStatus();
+  const actMap = [
+    ["pause", "jobs/pause"],
+    ["resume", "jobs/resume"],
+    ["cancel", "jobs/cancel"],
+    ["retry", "jobs/retry"],
+    ["dismiss", "jobs/dismiss"],
+  ];
+  for (const [attr, ep] of actMap) {
+    const id = e.target.dataset[attr];
+    if (id) {
+      await api(ep, { method: "POST", body: { id } }).catch((err) => toast(err.message));
+      pollStatus();
+      return;
+    }
+  }
 });
 
 // ---------- импорт ----------
@@ -2157,11 +2184,17 @@ function backendRadios(s) {
       : "Нужен платный ключ OpenAI API — выберите этот вариант, и под ним появится поле для ключа.",
   };
   const cloud = { "gigachat": "Сбера (GigaChat)", "claude-code": "Anthropic", "claude": "Anthropic", "gemini": "Google", "openai": "OpenAI" };
-  return Object.entries(s.backends).map(([k, v]) => `<label class="radio${k === s.llm_backend ? " selected" : ""}">
-    <input type="radio" name="backend" value="${k}"${k === s.llm_backend ? " checked" : ""}>
-    <div><div class="r-title">${esc(v)}${S.view === "setup" ? recoBadge("llm", k) : ""}</div><div class="r-desc">${esc(desc[k] || "")}</div>
-    ${cloud[k] ? `<div class="cloud-note">Текст расшифровки отправляется в облако ${cloud[k]}. Уточните, разрешено ли это для рабочих встреч.</div>` : ""}</div></label>
-    ${k === s.llm_backend ? backendExtra(s, k) : ""}`).join("");
+  return Object.entries(s.backends).map(([k, v]) => {
+    const blocked = k === "local" && s.local_llm_supported === false;
+    const dText = blocked
+      ? `Недоступно на устройстве с ${s.ram_gb || 8} ГБ ОЗУ (для локального Qwen 2.5 7B нужно от 12 ГБ). Используйте облачную модель.`
+      : (desc[k] || "");
+    return `<label class="radio${k === s.llm_backend ? " selected" : ""}${blocked ? " disabled" : ""}"${blocked ? ' style="opacity:.6;cursor:not-allowed"' : ""}>
+      <input type="radio" name="backend" value="${k}"${k === s.llm_backend ? " checked" : ""}${blocked ? " disabled" : ""}>
+      <div><div class="r-title">${esc(v)}${S.view === "setup" && !blocked ? recoBadge("llm", k) : ""}${blocked ? ' <span class="badge warn">нужно ≥12 ГБ ОЗУ</span>' : ""}</div><div class="r-desc">${esc(dText)}</div>
+      ${cloud[k] ? `<div class="cloud-note">Текст расшифровки отправляется в облако ${cloud[k]}. Уточните, разрешено ли это для рабочих встреч.</div>` : ""}</div></label>
+      ${k === s.llm_backend && !blocked ? backendExtra(s, k) : ""}`;
+  }).join("");
 }
 
 // Ключи облачных вариантов: вводятся прямо под выбранным вариантом (и при первом запуске).
@@ -2722,10 +2755,20 @@ function renderSettings() {
         `<option value="${id}"${(s.gigachat_scope || "GIGACHAT_API_PERS") === id ? " selected" : ""}>${label}</option>`).join("")}
     </select>`;
 
+    const localAllowed = s.local_llm_supported !== false;
     const llmModel = S.status && S.status.models && S.status.models.llm;
-    const qwenReady = !llmModel || llmModel.status === "ready";
-    const qwenActiveDl = llmModel && ["downloading", "paused", "error"].includes(llmModel.status);
+    const qwenReady = localAllowed && (!llmModel || llmModel.status === "ready");
+    const qwenActiveDl = localAllowed && llmModel && ["downloading", "paused", "error"].includes(llmModel.status);
     const keyCards = [];
+    if (!localAllowed) {
+      keyCards.push(`<div class="st-block">
+        <div class="key-card-head">
+          <div class="key-card-title">Qwen 2.5 7B (на ${PC}) <span class="badge warn">отключена</span></div>
+          <span class="muted small">${esc(String(s.ram_gb || 8))} ГБ ОЗУ</span>
+        </div>
+        <div class="st-desc" style="margin-top:4px">Локальный Qwen недоступен на устройствах с 8 ГБ оперативной памяти (нужно от 12 ГБ). Добавьте ключ облачного сервиса ниже.</div>
+      </div>`);
+    }
 
     if (qwenReady) {
       keyCards.push(`<div class="st-block">
@@ -2792,7 +2835,7 @@ function renderSettings() {
       </div>`);
     }
 
-    const needQwenPill = llmModel && !qwenReady && !qwenActiveDl;
+    const needQwenPill = localAllowed && llmModel && !qwenReady && !qwenActiveDl;
     const remainingPills = missingKeys.filter((p) => !addingDef || p.id !== addingDef.id);
     if (needQwenPill || remainingPills.length) {
       const qwenSize = fmtBytes(llmModel && llmModel.total ? llmModel.total : (IS_WIN ? 4.7e9 : 4.3e9));
@@ -3021,7 +3064,7 @@ function renderSettings() {
     if (!def || !confirm(`Удалить сохранённый токен ${def.title}?`)) return;
     delete S.keyCheck[def.service];
     const extra = {};
-    if (s.llm_backend === def.id) extra.llm_backend = "local";
+    if (s.llm_backend === def.id && s.local_llm_supported !== false) extra.llm_backend = "local";
     if (s.ask_backend_raw === def.id) extra.ask_backend = "";
     if (await save({ [def.field]: "", ...extra }, `Токен ${def.short} удалён`)) {
       KEY_UI.editing = null;

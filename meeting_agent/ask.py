@@ -217,6 +217,17 @@ def _context(sources: list[dict]) -> str:
 
 def backend(cfg: dict) -> str:
     b = cfg.get("ask", {}).get("backend") or cfg["llm"].get("backend", "local")
+    if b == "local":
+        from . import hardware
+        if not hardware.local_llm_supported():
+            from . import config
+            return next(
+                (k for k, ok in (("gigachat", config.gigachat_key(cfg)),
+                                 ("gemini", config.read_secret("gemini_key")),
+                                 ("claude", config.anthropic_key(cfg)),
+                                 ("openai", config.openai_key(cfg))) if ok),
+                "local",
+            )
     return b if b in BACKENDS else "local"
 
 
